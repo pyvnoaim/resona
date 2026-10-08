@@ -86,6 +86,7 @@ impl App {
         app.attach_menu(&cc.egui_ctx);
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
+        app.state.lock().unwrap().sort = Sort::from_key(&setting("sort").unwrap_or_default());
         app.attach_media(&cc.egui_ctx);
         let (state, slot, ctx) = (app.state.clone(), app.engine.clone(), cc.egui_ctx.clone());
         app.rt.spawn(async move {
@@ -161,18 +162,8 @@ impl App {
         self.rt.spawn(load_members(self.state.clone(), e.web.clone(), e.http.clone(), e.session.username()));
     }
 
-    /// Likes or unlikes a track: the heart flips at once, and flips back if Spotify says no.
     fn toggle_like(&self, id: String) {
-        let Some(e) = self.engine.get() else { return };
-        let on = !self.state.lock().unwrap().liked.contains(&id);
-        set_like(&self.state, &id, on);
-        let (state, web, http) = (self.state.clone(), e.web.clone(), e.http.clone());
-        self.rt.spawn(async move {
-            if let Err(err) = api::set_liked(&web, &http, &id, on).await {
-                set_like(&state, &id, !on);
-                state.lock().unwrap().error = Some(err);
-            }
-        });
+        if let Some(e) = self.engine.get() { toggle_like(self.rt.handle(), e, &self.state, id) }
     }
 
     /// Once the engine is up: the saved volume, and the list that was open last time.
@@ -238,7 +229,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
                 let mut s = state.lock().unwrap();
                 if s.view.as_ref() != Some(&src) { return false } // user moved on
                 s.expected = Some(total);
-                s.tracks.extend(tracks);
+                s.add_tracks(tracks);
                 ctx.request_repaint();
                 true
             }).await;
@@ -275,7 +266,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             let mut s = state.lock().unwrap();
             if s.view.as_ref() != Some(&src) { return } // user moved on
             match got {
-                Ok((tracks, page)) => (s.tracks, s.artist) = (tracks, page),
+                Ok((tracks, page)) => { s.artist = page; s.add_tracks(tracks) }
                 Err(e) => s.error = Some(e),
             }
             s.loading = false;
@@ -284,6 +275,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         return;
     }
     rt.spawn(async move {
+        let edits = state.lock().unwrap().liked_edits;
         let mut url = Some(match &src {
             Source::Liked => "me/tracks?limit=50".to_string(),
             Source::Playlist(id) => format!("playlists/{id}/items?limit=100"),
@@ -304,7 +296,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             match page {
                 Ok((tracks, next, total)) => {
                     s.expected = s.expected.or(total);
-                    s.tracks.extend(tracks);
+                    s.add_tracks(tracks);
                     // Search pages are small; 5 of them is plenty, and keeps us off the rate limit.
                     url = next.filter(|_| !matches!(src, Source::Search(_)) || pages < 5);
                 }
@@ -312,8 +304,30 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             }
             ctx.request_repaint();
         }
-        state.lock().unwrap().loading = false;
+        let mut s = state.lock().unwrap();
+        s.loading = false;
+        if src == Source::Liked && s.error.is_none() && s.liked_edits == edits {
+            // The whole of Liked Songs just loaded anyway: that's the fresh set of hearts (unless a like or
+            // unlike landed meanwhile; then the pages may predate it, and the set stays as it is).
+            s.liked = s.tracks.iter().filter_map(|t| t.id.clone()).collect();
+            s.liked_complete = true;
+            save_liked_ids(&s.liked);
+        }
+        drop(s);
         ctx.request_repaint();
+    });
+}
+
+/// Likes or unlikes a track: the heart flips at once, and flips back if Spotify says no.
+pub fn toggle_like(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, id: String) {
+    let on = !state.lock().unwrap().liked.contains(&id);
+    set_like(state, &id, on);
+    let (state, web, http) = (state.clone(), e.web.clone(), e.http.clone());
+    rt.spawn(async move {
+        if let Err(err) = api::set_liked(&web, &http, &id, on).await {
+            set_like(&state, &id, !on);
+            state.lock().unwrap().error = Some(err);
+        }
     });
 }
 

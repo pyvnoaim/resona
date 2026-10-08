@@ -456,6 +456,7 @@ impl App {
         let (mut clicked, mut like, mut add, mut enqueue) = (None, None, None, None);
         let mut want_members = false;
         let (mut goto, mut play_all, mut hovered): (Option<Source>, Option<bool>, Option<api::Track>) = (None, None, None);
+        let mut resort = false;
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
         let jump_row = self.jump.as_ref().and_then(|id| s.tracks.iter().position(|t| t.id.as_ref() == Some(id)));
         if jump_row.is_some() || !s.loading && s.view.is_some() && self.jump.is_some() && !s.tracks.is_empty() { self.jump = None }
@@ -514,6 +515,11 @@ impl App {
                                 let total: u64 = s.tracks.iter().map(|t| t.duration_ms as u64).sum();
                                 let length = if matches!(sk, Skin::Swiss) { total_length(total) } else { total_length(total).to_uppercase() };
                                 let count = if n > 0 { format!("{count} · {length}") } else { count };
+                                let count = match s.sort_label() {
+                                    Some(l) if matches!(sk, Skin::Swiss) => format!("{count} · {l}"),
+                                    Some(l) => format!("{count} · {}", l.to_uppercase()),
+                                    None => count,
+                                };
                                 match (&s.notice, sk) {
                                     (Some(note), _) => { ui.label(RichText::new(format!("{count} · {note}")).font(small(sk)).color(p.dim)); }
                                     (None, _) => { ui.label(RichText::new(count).font(small(sk)).color(p.dim)); }
@@ -526,6 +532,12 @@ impl App {
                                 let caps = !matches!(sk, Skin::Swiss);
                                 if skin::action_button(ui, if caps { "▶ PLAY" } else { "Play" }, true).clicked() { play_all = Some(false) }
                                 if skin::action_button(ui, if caps { "SHUFFLE" } else { "Shuffle" }, false).clicked() { play_all = Some(true) }
+                                // Only where it does something: lists with dates (not search, albums, artists).
+                                if s.tracks.iter().any(|t| t.added > 0) {
+                                    let order = s.sort.label().unwrap_or("list order");
+                                    let text = if caps { format!("SORT: {}", order.to_uppercase()) } else { format!("Sort: {order}") };
+                                    if skin::action_button(ui, &text, false).on_hover_text("List order → newest added → oldest added (⌘O)").clicked() { resort = true }
+                                }
                             });
                         }
                     });
@@ -762,6 +774,7 @@ impl App {
             s.notice = Some(format!("{} \u{201c}{}\u{201d}", if next { "Playing next:" } else { "Queued:" }, t.name));
             s.enqueue(&e.player, t, next);
         }
+        if resort { s.cycle_sort() }
         if let (Some(shuffled), Some(e)) = (play_all, self.engine.get()) {
             if shuffled { s.shuffle = true }
             let (list, src) = (s.tracks.clone(), s.view.clone());

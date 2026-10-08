@@ -42,23 +42,43 @@ pub fn load_settings(ctx: &egui::Context) {
     }
 }
 
-/// Songs Spotify refused, one id per line in ~/.resona/unplayable, so they stay skipped next launch.
+fn ids_path(name: &str) -> std::path::PathBuf {
+    std::env::home_dir().unwrap().join(".resona").join(name)
+}
+
+/// Track ids, one per line in ~/.resona/<name>; None when there is no such file.
+fn read_ids(name: &str) -> Option<HashSet<String>> {
+    let text = std::fs::read_to_string(ids_path(name)).ok()?;
+    Some(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+}
+
+fn write_ids(name: &str, set: &HashSet<String>) {
+    let _ = std::fs::write(ids_path(name), set.iter().map(|i| format!("{i}\n")).collect::<String>());
+}
+
+/// Songs Spotify refused, in ~/.resona/unplayable, so they stay skipped next launch.
 pub fn remember_unplayable(id: &str) {
     use std::io::Write;
-    let path = std::env::home_dir().unwrap().join(".resona").join("unplayable");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ids_path("unplayable")) {
         let _ = writeln!(f, "{id}");
     }
 }
 
 /// Clicking a faded song gives it another chance: it leaves the list (and the file).
 pub fn forget_unplayable(set: &mut HashSet<String>, id: &str) {
-    if !set.remove(id) { return }
-    let path = std::env::home_dir().unwrap().join(".resona").join("unplayable");
-    let _ = std::fs::write(path, set.iter().map(|i| format!("{i}\n")).collect::<String>());
+    if set.remove(id) { write_ids("unplayable", set) }
 }
 
 pub fn load_unplayable() -> HashSet<String> {
-    let path = std::env::home_dir().unwrap().join(".resona").join("unplayable");
-    std::fs::read_to_string(path).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+    read_ids("unplayable").unwrap_or_default()
+}
+
+/// Liked song ids in ~/.resona/liked: the hearts at startup without reading all of Liked Songs.
+/// None on a first run. Only a complete set is ever saved (`State::liked_complete`).
+pub fn load_liked_ids() -> Option<HashSet<String>> {
+    read_ids("liked")
+}
+
+pub fn save_liked_ids(set: &HashSet<String>) {
+    write_ids("liked", set)
 }

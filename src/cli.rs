@@ -15,7 +15,7 @@ use eframe::egui;
 use librespot::playback::mixer::Mixer;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{command, engine::*, open_list, settings::*, state::*, ui::short_err};
+use crate::{command, engine::*, open_list, settings::*, state::*, toggle_like, ui::short_err};
 
 type C = (u8, u8, u8);
 const BG: C = (0x1a, 0x1d, 0x23);
@@ -25,6 +25,8 @@ const PANEL: C = (0x1e, 0x21, 0x28);
 const CURSOR: C = (0x4a, 0x1d, 0x23);
 const DULL: C = (0x2e, 0x21, 0x26);
 const FG: C = (0xc9, 0xd1, 0xd9);
+/// The playing song's name and ▶ on the selected (red) row, where red on red would vanish.
+const BRIGHT: C = (0xf4, 0xf6, 0xf8);
 const DIM: C = (0x6b, 0x72, 0x80);
 const SUB: C = (0x5f, 0x67, 0x73);
 const FAINT: C = (0x4a, 0x51, 0x5b);
@@ -32,8 +34,9 @@ const GUTTER: C = (0x34, 0x3a, 0x44);
 const RED: C = (0xe0, 0x28, 0x2e);
 
 const KEYS: &[(&str, &str)] = &[
-    ("↑↓", "move"), ("tab", "pane"), ("enter", "play"), ("/", "search"), ("q", "quit"),
-    ("space", "pause"), ("n b", "next / back"), ("←→", "seek"), ("+-", "volume"), ("s", "shuffle"), ("r", "repeat"), ("t", "style"),
+    ("↑↓", "move"), ("tab", "pane"), ("enter", "play"), ("/", "search"), (".", "playing"), ("q", "quit"),
+    ("space", "pause"), ("n b", "next / back"), ("←→", "seek"), ("+-", "volume"), ("s", "shuffle"), ("r", "repeat"),
+    ("l", "like"), ("a", "queue"), ("o", "sort"), ("t", "style"), ("^L", "redraw"),
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -58,6 +61,12 @@ struct Tui {
     seen: Option<Source>,
     body_h: usize,
     style: Style,
+    /// `.`: the playing song's id, to put the cursor on once its list is open.
+    jump: Option<String>,
+    /// The song under the cursor, so it stays there when a sorted list moves songs around (pages arriving, `o`).
+    sel: Option<String>,
+    /// Ctrl+L: send the whole screen next time, not only what changed.
+    repaint: bool,
 }
 
 pub fn run() {
@@ -71,18 +80,21 @@ pub fn run() {
     let state: Shared = Default::default();
     let slot: Arc<OnceLock<Engine>> = Default::default();
     state.lock().unwrap().unplayable = load_unplayable();
+    state.lock().unwrap().sort = Sort::from_key(&setting("sort").unwrap_or_default());
     let (st, sl, cx) = (state.clone(), slot.clone(), ctx.clone());
     rt.spawn(async move {
         if let Err(e) = connect(st.clone(), sl, cx).await { st.lock().unwrap().error = Some(e) }
     });
 
     let mut ui = Tui {
-        pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1,
+        pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, repaint: false,
         style: if setting("cli_style").as_deref() == Some("board") { Style::Board } else { Style::Card },
         volume: setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7),
     };
     let mut restored = false;
     let mut out = std::io::stdout();
+    // What's on screen now, so each tick only sends the lines that changed (the clock, mostly).
+    let (mut shown, mut shown_size): (Vec<String>, (u16, u16)) = (Vec::new(), (0, 0));
     loop {
         if let (Some(e), false) = (slot.get(), restored) {
             restored = true;
@@ -91,8 +103,11 @@ pub fn run() {
             open_list(rt.handle(), e, &state, last, &ctx);
         }
         let (w, h) = terminal::size().unwrap_or((80, 24));
-        let frame = ui.draw(&state.lock().unwrap(), w as usize, h as usize);
-        let _ = out.write_all(frame.as_bytes()).and_then(|_| out.flush());
+        if (w, h) != shown_size || std::mem::take(&mut ui.repaint) { (shown, shown_size) = (Vec::new(), (w, h)) } // resize or Ctrl+L: everything
+        let lines = ui.draw(&state.lock().unwrap(), w as usize, h as usize);
+        let update = paint(&shown, &lines);
+        if !update.is_empty() { let _ = out.write_all(update.as_bytes()).and_then(|_| out.flush()); }
+        shown = lines;
         // Idle costs nothing: the clock only ticks while something moves.
         let busy = { let s = state.lock().unwrap(); s.since.is_some() || s.loading || (slot.get().is_none() && s.error.is_none()) };
         if !event::poll(Duration::from_millis(if busy { 250 } else { 2000 })).unwrap_or(false) { continue }
@@ -122,9 +137,12 @@ impl Tui {
             return true;
         }
         if k.code == KeyCode::Char('q') { return false }
+        if k.code == KeyCode::Char('l') && k.modifiers.contains(KeyModifiers::CONTROL) { self.repaint = true; return true }
         let Some(e) = e else { return true };
         let (lists, rows) = { let s = state.lock().unwrap(); (1 + s.playlists.len(), s.tracks.len()) };
         let page = self.body_h.max(1);
+        let song_at = |row: usize| state.lock().unwrap().tracks.get(row).and_then(|t| t.id.clone());
+        let (held, before) = (song_at(self.row), self.row);
         let (cur, len) = match self.pane { Pane::Lists => (&mut self.side, lists), Pane::Songs => (&mut self.row, rows) };
         let last = len.saturating_sub(1);
         let cmd = |c| command(e, &mut state.lock().unwrap(), c);
@@ -165,27 +183,65 @@ impl Tui {
             KeyCode::Char('s') => state.lock().unwrap().toggle_shuffle(),
             KeyCode::Char('r') => state.lock().unwrap().cycle_repeat(),
             KeyCode::Char('/') => self.search = Some(String::new()),
+            // The selected song, or the playing one while the lists have focus.
+            KeyCode::Char('l') => {
+                let id = {
+                    let s = state.lock().unwrap();
+                    let t = if self.pane == Pane::Songs { s.tracks.get(self.row) } else { s.now.as_ref() };
+                    t.and_then(|t| t.id.clone())
+                };
+                if let Some(id) = id { toggle_like(rt, e, state, id) }
+            }
+            KeyCode::Char('a') if self.pane == Pane::Songs => {
+                let mut s = state.lock().unwrap();
+                if let Some(t) = s.tracks.get(self.row).cloned() {
+                    s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
+                    s.enqueue(&e.player, t, false);
+                }
+            }
+            KeyCode::Char('.') => {
+                let (src, id) = { let s = state.lock().unwrap(); (s.queue_src.clone(), s.now.as_ref().and_then(|t| t.id.clone())) };
+                if let Some(src) = src { open_list(rt, e, state, src, ctx) } // no-op when it's already open
+                (self.jump, self.pane) = (id, Pane::Songs);
+            }
+            KeyCode::Char('o') => state.lock().unwrap().cycle_sort(), // the cursor follows its song (`sel`)
             KeyCode::Char('t') => {
                 self.style = if self.style == Style::Card { Style::Board } else { Style::Card };
                 set_setting("cli_style", if self.style == Style::Board { "board" } else { "card" });
             }
             _ => {}
         }
+        // Moving picks a new song; anything else keeps the one that was under the cursor.
+        self.sel = if self.row != before { song_at(self.row) } else { held };
         true
     }
 
     /// The whole screen, every cell, as one write.
-    fn draw(&mut self, s: &State, w: usize, h: usize) -> String {
+    fn draw(&mut self, s: &State, w: usize, h: usize) -> Vec<String> {
         if w < 60 || h < 18 {
             let mut lines = vec![center(&[("make the window a little bigger".into(), DIM)], w)];
             lines.resize_with(h, || Seg::new(w, None).done());
-            return frame(lines);
+            return lines;
         }
         let lists = lists_of(s);
         if s.view != self.seen {
             // A new list: start at its top, and point the sidebar at it.
-            (self.row, self.row_top, self.seen) = (0, 0, s.view.clone());
+            (self.row, self.row_top, self.seen, self.sel) = (0, 0, s.view.clone(), None);
             if let Some(i) = lists.iter().position(|(src, _)| Some(src) == s.view.as_ref()) { self.side = i }
+        }
+        if let Some(id) = &self.sel
+            && s.tracks.get(self.row).and_then(|t| t.id.as_ref()) != Some(id)
+            && let Some(i) = s.tracks.iter().position(|t| t.id.as_ref() == Some(id))
+        {
+            self.row = i; // songs moved (a sorted page arrived, or `o`): follow the one under the cursor
+        }
+        if let Some(id) = &self.jump {
+            // `.`: land on the playing song once its list has it (or give up once the list is done loading).
+            match s.tracks.iter().position(|t| t.id.as_ref() == Some(id)) {
+                Some(i) => (self.row, self.jump) = (i, None),
+                None if !s.loading => self.jump = None,
+                None => {}
+            }
         }
         self.side = self.side.min(lists.len().saturating_sub(1));
         self.row = self.row.min(s.tracks.len().saturating_sub(1));
@@ -198,7 +254,7 @@ impl Tui {
     }
 
     /// A centred card of titled boxes on the terminal's own background, filling the window.
-    fn card(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> String {
+    fn card(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> Vec<String> {
         let blank = || Seg::new(w, None).done();
         let cw = (w - 4).min(220);
         let x0 = (w - cw) / 2;
@@ -222,20 +278,12 @@ impl Tui {
         let lw = (longest + 4).clamp(22, (cw / 3).max(22));
         let rw = cw - lw - 1;
         let edge = |pane| if self.pane == pane { RED } else { FAINT };
-        let count = match (s.loading, s.expected) {
-            (true, Some(n)) => format!("loading {}/{n}", s.tracks.len()),
-            (true, None) => "loading…".into(),
-            _ => format!("{} songs", s.tracks.len()),
-        };
+        let count = count(s);
         lines.push(line(format!("{} {}",
             top(lw, edge(Pane::Lists), &[("library".into(), FG)], &[(lists.len().to_string(), DIM)]),
             top(rw, edge(Pane::Songs), &[(title(s, lists), FG)], &[(count, DIM)]))));
         scroll(&mut self.side_top, self.side, body_h);
         scroll(&mut self.row_top, self.row, body_h);
-        let now_id = s.now.as_ref().and_then(|t| t.id.as_ref());
-        let num_w = s.tracks.len().max(10).to_string().len();
-        let rest = (rw - 4).saturating_sub(num_w + 2 + 2 + 6);
-        let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
         let cursor_bg = |on: bool, pane| if !on { None } else if self.pane == pane { Some(CURSOR) } else { Some(DULL) };
         for i in 0..body_h {
             let mut left = Seg::new(lw - 4, None);
@@ -247,19 +295,8 @@ impl Tui {
             }
             let at = self.row_top + i;
             let mut right = Seg::new(rw - 4, None);
-            if let Some(t) = s.tracks.get(at) {
-                let playing = t.id.is_some() && t.id.as_ref() == now_id;
-                let gone = t.id.as_ref().is_some_and(|id| s.unplayable.contains(id));
-                let liked = t.id.as_ref().is_some_and(|id| s.liked.contains(id));
-                let sel = at == self.row;
-                let (fg, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
-                let num = if playing { "▶".to_string() } else { (at + 1).to_string() };
-                right = Seg::new(rw - 4, cursor_bg(sel, Pane::Songs));
-                right.col(&format!("{num:>num_w$}"), if playing { RED } else if sel { fg } else { GUTTER }, num_w + 2)
-                    .col(&t.name, if playing { RED } else if gone { fg } else { FG }, name_w)
-                    .col(&t.artist_line(), if gone { fg } else { sub }, artist_w)
-                    .col(if liked { "♥" } else { "" }, RED, 2)
-                    .right(&[(clock(t.duration_ms), DIM)], 0);
+            if at < s.tracks.len() {
+                right = song_row(s, at, rw - 4, false, cursor_bg(at == self.row, Pane::Songs), at == self.row);
             } else if i == 0 && s.tracks.is_empty() {
                 right.put(if s.loading || s.view.is_none() { "…" } else { "nothing here" }, GUTTER);
             }
@@ -306,16 +343,16 @@ impl Tui {
                 lines.push(line(center(&keys(&[("enter", "search"), ("esc", "cancel")]), cw)));
             }
             None => {
-                lines.push(line(center(&keys(&KEYS[..5]), cw)));
-                lines.push(line(center(&keys(&KEYS[5..]), cw)));
+                lines.push(line(center(&keys(&KEYS[..6]), cw)));
+                lines.push(line(center(&keys(&KEYS[6..]), cw)));
             }
         }
         lines.resize_with(h, blank);
-        frame(lines)
+        lines
     }
 
     /// Full width on a painted background: a header, lists and songs, the player, the keys.
-    fn board(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> String {
+    fn board(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> Vec<String> {
         let mut lines = Vec::with_capacity(h);
         let inner = w - 4;
         let rule = || Seg::new(w, Some(BG)).pad(2).put(&"─".repeat(inner), RULE).done();
@@ -328,12 +365,7 @@ impl Tui {
             status.push((s.status.clone(), DIM));
         } else {
             status.push((title(s, lists), DIM));
-            let count = match (s.loading, s.expected) {
-                (true, Some(n)) => format!("loading {}/{n}", s.tracks.len()),
-                (true, None) => "loading…".into(),
-                _ => format!("{} songs", s.tracks.len()),
-            };
-            status.push((format!("  ·  {count}"), SUB));
+            status.push((format!("  ·  {}", count(s)), SUB));
             if let Some(n) = &s.notice { status.push((format!("  ·  {n}"), SUB)) }
         }
         let mut head = Seg::new(w, Some(BG));
@@ -348,10 +380,6 @@ impl Tui {
         let rw = inner - lw - 3;
         scroll(&mut self.side_top, self.side, body_h);
         scroll(&mut self.row_top, self.row, body_h);
-        let now_id = s.now.as_ref().and_then(|t| t.id.as_ref());
-        let num_w = s.tracks.len().max(10).to_string().len();
-        let rest = rw.saturating_sub(2 + num_w + 2 + 2 + 6);
-        let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
         let cursor_bg = |on: bool, pane| Some(if !on { BG } else if self.pane == pane { CURSOR } else { DULL });
         for i in 0..body_h {
             let mut left = Seg::new(lw, Some(BG));
@@ -363,19 +391,8 @@ impl Tui {
             }
             let at = self.row_top + i;
             let mut right = Seg::new(rw, Some(BG));
-            if let Some(t) = s.tracks.get(at) {
-                let playing = t.id.is_some() && t.id.as_ref() == now_id;
-                let gone = t.id.as_ref().is_some_and(|id| s.unplayable.contains(id));
-                let liked = t.id.as_ref().is_some_and(|id| s.liked.contains(id));
-                let sel = at == self.row;
-                let (fg, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
-                right = Seg::new(rw, cursor_bg(sel, Pane::Songs));
-                right.put(if playing { "▌ " } else { "  " }, RED)
-                    .col(&format!("{:>num_w$}", at + 1), if playing { RED } else { fg }, num_w + 2)
-                    .col(&t.name, if gone { fg } else { FG }, name_w)
-                    .col(&t.artist_line(), if gone { fg } else { sub }, artist_w)
-                    .col(if liked { "♥" } else { "" }, RED, 2)
-                    .right(&[(clock(t.duration_ms), DIM)], 0);
+            if at < s.tracks.len() {
+                right = song_row(s, at, rw, true, cursor_bg(at == self.row, Pane::Songs), at == self.row);
             } else if i == 0 && s.tracks.is_empty() {
                 right.pad(2).put(if s.loading || s.view.is_none() { "…" } else { "nothing here" }, FAINT);
             }
@@ -421,7 +438,42 @@ impl Tui {
             },
         }
         lines.push(keys.done());
-        frame(lines)
+        lines
+    }
+}
+
+/// One song row, `w` wide, the same in both styles: number (▶ when playing), name, artists, heart, length.
+/// `bar` adds the board's red bar in front of the playing song; `bg` is the row's background (lit when `sel`).
+fn song_row(s: &State, at: usize, w: usize, bar: bool, bg: Option<C>, sel: bool) -> Seg {
+    let t = &s.tracks[at];
+    let playing = t.id.is_some() && t.id == s.now.as_ref().and_then(|n| n.id.clone());
+    let gone = t.id.as_ref().is_some_and(|id| s.unplayable.contains(id));
+    let liked = t.id.as_ref().is_some_and(|id| s.liked.contains(id));
+    let num_w = s.tracks.len().max(10).to_string().len();
+    let rest = w.saturating_sub(if bar { 2 } else { 0 } + num_w + 2 + 2 + 6);
+    let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
+    // Faded songs and the number column step up a shade on the selected row; red would vanish on it.
+    let (faded, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
+    let accent = if sel { BRIGHT } else { RED };
+    let num = if playing { "▶".to_string() } else { (at + 1).to_string() };
+    let mut row = Seg::new(w, bg);
+    if bar { row.put(if playing { "▌ " } else { "  " }, RED); }
+    row.col(&format!("{num:>num_w$}"), if playing { accent } else { faded }, num_w + 2)
+        .col(&t.name, if playing { accent } else if gone { faded } else { FG }, name_w)
+        .col(&t.artist_line(), if gone { faded } else { sub }, artist_w)
+        .col(if liked { "♥" } else { "" }, accent, 2)
+        .right(&[(clock(t.duration_ms), DIM)], 0);
+    row
+}
+
+fn count(s: &State) -> String {
+    match (s.loading, s.expected) {
+        (true, Some(n)) => format!("loading {}/{n}", s.tracks.len()),
+        (true, None) => "loading…".into(),
+        _ => match s.sort_label() {
+            Some(l) => format!("{} songs · {l}", s.tracks.len()),
+            None => format!("{} songs", s.tracks.len()),
+        },
     }
 }
 
@@ -502,9 +554,14 @@ fn clock(ms: u32) -> String {
     format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
 }
 
-fn frame(lines: Vec<String>) -> String {
-    // Synchronized update, so the terminal never shows half a frame.
-    format!("\x1b[?2026h\x1b[H{}\x1b[0m\x1b[?2026l", lines.join("\x1b[0m\r\n"))
+/// The lines of `next` that differ from `prev`, each moved to its row; nothing when nothing changed.
+/// One synchronized update, so the terminal never shows half a frame.
+fn paint(prev: &[String], next: &[String]) -> String {
+    let changed: String = next.iter().enumerate()
+        .filter(|(i, l)| prev.get(*i) != Some(l))
+        .map(|(i, l)| format!("\x1b[{};1H{l}\x1b[0m", i + 1))
+        .collect();
+    if changed.is_empty() { changed } else { format!("\x1b[?2026h{changed}\x1b[?2026l") }
 }
 
 fn width(parts: &[(String, C)]) -> usize {
@@ -611,6 +668,9 @@ fn fit_cuts_by_cells_and_rows_come_out_exactly_wide() {
     let boxed = top(30, RED, &[("a title far too long for it".into(), FG)], &[("68".into(), DIM)]);
     let plain: String = boxed.split('\x1b').map(|p| p.split_once('m').map_or(p, |(_, t)| t)).collect();
     assert_eq!(fit(&plain, usize::MAX).1, 30); // titled borders stay exactly as wide as their box
+    let (a, b) = (vec!["x".to_string(), "y".into()], vec!["x".to_string(), "z".into()]);
+    assert_eq!(paint(&a, &a), ""); // an unchanged screen sends nothing
+    assert_eq!(paint(&a, &b), "\x1b[?2026h\x1b[2;1Hz\x1b[0m\x1b[?2026l"); // only row 2
     let mut top = 0;
     scroll(&mut top, 30, 10);
     assert_eq!(top, 21); // the cursor sits on the last visible row

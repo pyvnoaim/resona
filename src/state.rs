@@ -58,6 +58,29 @@ pub enum Repeat {
     One,
 }
 
+/// How the open list is ordered: as Spotify keeps it, or by when songs were added. Lists without dates
+/// (search, albums, artists) look the same in every order.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum Sort {
+    #[default]
+    List,
+    Newest,
+    Oldest,
+}
+
+impl Sort {
+    /// How it's named next to the song count; nothing for the list's own order.
+    pub fn label(self) -> Option<&'static str> {
+        match self { Sort::List => None, Sort::Newest => Some("newest added first"), Sort::Oldest => Some("oldest added first") }
+    }
+    pub fn key(self) -> &'static str {
+        match self { Sort::List => "list", Sort::Newest => "newest", Sort::Oldest => "oldest" }
+    }
+    pub fn from_key(k: &str) -> Self {
+        match k { "newest" => Sort::Newest, "oldest" => Sort::Oldest, _ => Sort::List }
+    }
+}
+
 /// Everything that drives playback: buttons, media keys, keyboard.
 #[derive(Clone, Copy)]
 pub enum Cmd {
@@ -89,6 +112,10 @@ pub struct State {
     pub since: Option<Instant>,
     /// Track ids known to be in Liked Songs (checked as lists load).
     pub liked: HashSet<String>,
+    /// `liked` holds all of Liked Songs (from ~/.resona/liked or a full read), so it may be saved.
+    pub liked_complete: bool,
+    /// Counts likes and unlikes, so a Liked Songs load that raced one doesn't undo it.
+    pub liked_edits: u32,
     /// Tracks Spotify refused to play this session; skipped and greyed out.
     pub unplayable: HashSet<String>,
     /// Which way we were moving through the queue (1 or -1), so a refused track is skipped the same way.
@@ -103,6 +130,7 @@ pub struct State {
     pub lyrics: Option<(String, Lyrics)>,
     pub shuffle: bool,
     pub repeat: Repeat,
+    pub sort: Sort,
     /// The queue in its original order, to go back to when shuffle is switched off.
     pub base: Vec<api::Track>,
     /// How many tracks right after `qi` were added by hand ("Add to queue" / "Play next").
@@ -190,6 +218,36 @@ impl State {
         self.queued = kept.len();
     }
 
+    /// Songs arriving for the open list (a page, or all of them): numbered in list order, then sorted.
+    pub fn add_tracks(&mut self, new: Vec<api::Track>) {
+        let at = self.tracks.len();
+        self.tracks.extend(new.into_iter().enumerate().map(|(i, t)| api::Track { pos: at + i, ..t }));
+        self.sort_tracks();
+    }
+
+    /// The sort, named for the song count: only when it does something here (search, albums and artists
+    /// have no dates, so every order looks the same).
+    pub fn sort_label(&self) -> Option<&'static str> {
+        if self.view == Some(Source::Queue) { return None } // drawn from the queue, never sorted
+        self.sort.label().filter(|_| self.tracks.iter().any(|t| t.added > 0))
+    }
+
+    /// List order → newest added → oldest added, remembered for next time.
+    pub fn cycle_sort(&mut self) {
+        self.sort = match self.sort { Sort::List => Sort::Newest, Sort::Newest => Sort::Oldest, Sort::Oldest => Sort::List };
+        crate::settings::set_setting("sort", self.sort.key());
+        self.sort_tracks();
+    }
+
+    fn sort_tracks(&mut self) {
+        // Stable, with list order breaking ties, so songs without dates keep their places.
+        match self.sort {
+            Sort::List => self.tracks.sort_by_key(|t| t.pos),
+            Sort::Newest => self.tracks.sort_by_key(|t| (std::cmp::Reverse(t.added), t.pos)),
+            Sort::Oldest => self.tracks.sort_by_key(|t| (t.added, t.pos)),
+        }
+    }
+
     pub fn toggle_shuffle(&mut self) {
         let on = !self.shuffle;
         self.set_shuffle(on);
@@ -260,6 +318,22 @@ pub fn seed() -> u64 {
 pub struct ArtistPage {
     pub portrait: Option<String>,
     pub releases: Vec<api::Release>,
+}
+
+#[test]
+fn sorting_by_added_keeps_undated_songs_in_list_order_and_comes_back() {
+    let t = |name: &str, added| api::Track { name: name.into(), added, ..Default::default() };
+    let mut s = State::default();
+    s.add_tracks(vec![t("b", 20), t("a", 10), t("c", 30)]);
+    let names = |s: &State| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join("");
+    s.sort = Sort::Oldest; s.sort_tracks();
+    assert_eq!(names(&s), "abc");
+    s.sort = Sort::Newest; s.sort_tracks();
+    assert_eq!(names(&s), "cba");
+    s.add_tracks(vec![t("x", 0), t("y", 0)]); // a later page, no dates: after the dated ones, in order
+    assert_eq!(names(&s), "cbaxy");
+    s.sort = Sort::List; s.sort_tracks();
+    assert_eq!(names(&s), "bacxy"); // the list's own order again
 }
 
 #[test]

@@ -156,6 +156,12 @@ pub struct Track {
     pub duration_ms: u32,
     #[serde(rename = "type", default)]
     pub kind: String,
+    /// When it was added to the list (ms since 1970; 0 when the list has no dates). Only for sorting.
+    #[serde(skip)]
+    pub added: i64,
+    /// Its place in the list as Spotify keeps it, so "list order" can come back after a sort.
+    #[serde(skip)]
+    pub pos: usize,
 }
 
 impl Track {
@@ -173,11 +179,13 @@ impl Track {
 pub struct Entry {
     track: Option<Track>,
     item: Option<Track>,
+    added_at: Option<String>,
 }
 
 impl Entry {
     pub fn playable(self) -> Option<Track> {
-        self.track.or(self.item).filter(|t| t.kind == "track" && t.id.is_some())
+        let added = self.added_at.as_deref().and_then(|a| librespot::core::date::Date::from_iso8601(a).ok()).map_or(0, |d| d.as_timestamp_ms());
+        self.track.or(self.item).filter(|t| t.kind == "track" && t.id.is_some()).map(|t| Track { added, ..t })
     }
 }
 
@@ -191,10 +199,11 @@ pub async fn add_to_playlist(auth: &WebAuth, http: &reqwest::Client, playlist: &
     send(auth, http, reqwest::Method::POST, &format!("playlists/{playlist}/items"), Some(body)).await.map(drop)
 }
 
-/// Adds a track to Liked Songs, or removes it.
+/// Adds a track to Liked Songs, or removes it. Spotify moved saving to `/me/library` (by URI) in 2026;
+/// the old `/me/tracks?ids=` answers 403.
 pub async fn set_liked(auth: &WebAuth, http: &reqwest::Client, id: &str, on: bool) -> Result<(), String> {
     let method = if on { reqwest::Method::PUT } else { reqwest::Method::DELETE };
-    send(auth, http, method, &format!("me/tracks?ids={id}"), None).await.map(drop)
+    send(auth, http, method, &format!("me/library?uris=spotify:track:{id}"), None).await.map(drop)
 }
 
 /// One Web API call (with an optional JSON body), auth and rate-limit handling; errors for non-2xx answers.
@@ -238,8 +247,8 @@ fn entry_accepts_both_shapes_and_skips_episodes() {
 }
 
 /// Your playlists as the official client lists them (the rootlist), through the session: the sidebar's
-/// fallback when the Web API refuses (a rate-limit ban). No covers, and no owner id, so `web_readable` is
-/// false and they open through the session too.
+/// fallback when the Web API refuses (a rate-limit ban). No owner id, so `web_readable` is false and they
+/// open through the session too.
 pub async fn session_playlists(session: &Session) -> Result<Vec<Playlist>, String> {
     use librespot::protocol::playlist4_external::SelectedListContent;
     use protobuf::Message;
@@ -256,8 +265,19 @@ fn rootlist_playlists(list: &librespot::protocol::playlist4_external::SelectedLi
     if contents.items.len() != contents.meta_items.len() { return None }
     Some(contents.items.iter().zip(&contents.meta_items).filter_map(|(item, meta)| {
         let id = item.uri().strip_prefix("spotify:playlist:")?; // folders are start-group / end-group items
+        // Covers: the sized links the official client uses, else the picture id as a CDN link.
+        let a = &meta.attributes;
+        // Largest first, smallest last, like the Web API (the sidebar takes the last, the header the first).
+        let rank = |name: &str| ["xlarge", "large", "default", "small"].iter().position(|n| *n == name).unwrap_or(2);
+        let mut sizes: Vec<_> = a.picture_size.iter().filter(|p| !p.url().is_empty()).collect();
+        sizes.sort_by_key(|p| rank(p.target_name()));
+        let mut images: Vec<Image> = sizes.into_iter().map(|p| Image { url: p.url().into() }).collect();
+        if images.is_empty() && !a.picture().is_empty() {
+            let hex: String = a.picture().iter().map(|b| format!("{b:02x}")).collect();
+            images.push(Image { url: format!("https://i.scdn.co/image/{hex}") });
+        }
         // No owner: the rootlist only has account ids, not names.
-        Some(Playlist { id: id.into(), name: meta.attributes.name().into(), images: None, owner: None, collaborative: false })
+        Some(Playlist { id: id.into(), name: a.name().into(), images: Some(images).filter(|i| !i.is_empty()), owner: None, collaborative: false })
     }).collect())
 }
 
@@ -286,23 +306,57 @@ fn rootlist_keeps_playlists_skips_folders_and_never_reads_as_web_readable() {
 /// Tracks of a playlist someone else owns, read through the session like the official client does.
 /// Hands them over `CHUNK` at a time with the playlist's track count; stops early when `each` returns false (the user moved on).
 pub async fn session_playlist(session: &Session, id: &str, mut each: impl FnMut(Vec<Track>, usize) -> bool) -> Result<(), String> {
+    use librespot::protocol::playlist4_external::SelectedListContent;
+    use protobuf::Message;
     const CHUNK: usize = 25;
-    let uri = SpotifyUri::from_uri(&format!("spotify:playlist:{id}")).map_err(|e| e.to_string())?;
-    let list = metadata::Playlist::get(session, &uri).await.map_err(|e| format!("Playlist: {e}"))?;
-    let uris: Vec<SpotifyUri> = list.tracks().filter(|u| matches!(u, SpotifyUri::Track { .. })).cloned().collect();
-    for chunk in uris.chunks(CHUNK) {
-        let mut set = tokio::task::JoinSet::new();
-        for (i, u) in chunk.iter().cloned().enumerate() {
-            let session = session.clone();
-            set.spawn(async move { (i, metadata::Track::get(&session, &u).await) });
+    const PAGE: usize = 100;
+    // librespot allows 300 requests per 30 s (then 10/s), shared with playback. Past the first 200 songs, go
+    // at ~8/s so the player keeps room: when it's starved, a playable song gets reported as refused.
+    const BURST: usize = 200;
+    // Page through the list ourselves: librespot's `Playlist::get` asks once, for the first part only.
+    let (mut from, mut fetched) = (0, 0);
+    loop {
+        let path = format!("/playlist/v2/playlist/{id}?from={from}&length={PAGE}");
+        let bytes = patient(|| session.spclient().request(&reqwest::Method::GET, &path, None, None)).await.map_err(|e| format!("Playlist: {e}"))?;
+        let list = SelectedListContent::parse_from_bytes(&bytes).map_err(|e| format!("Playlist: {e}"))?;
+        let total = list.length().max(0) as usize;
+        let items = &list.contents.get_or_default().items;
+        let page: Vec<(SpotifyUri, i64)> = items.iter()
+            .filter_map(|it| Some((SpotifyUri::from_uri(it.uri()).ok()?, it.attributes.timestamp())))
+            .filter(|(u, _)| matches!(u, SpotifyUri::Track { .. }))
+            .collect();
+        for chunk in page.chunks(CHUNK) {
+            if !each(Vec::new(), total) { return Ok(()) } // moved on: stop before spending more of the budget
+            if fetched >= BURST { tokio::time::sleep(Duration::from_secs(3)).await }
+            fetched += chunk.len();
+            let mut set = tokio::task::JoinSet::new();
+            for (i, (u, added)) in chunk.iter().cloned().enumerate() {
+                let session = session.clone();
+                set.spawn(async move { (i, patient(|| metadata::Track::get(&session, &u)).await.map(|t| Track { added, ..Track::from(t) })) });
+            }
+            let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
+            while let Some(Ok((i, t))) = set.join_next().await {
+                got[i] = t.ok(); // unavailable tracks just drop out
+            }
+            if !each(got.into_iter().flatten().collect(), total) { return Ok(()) }
         }
-        let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
-        while let Some(Ok((i, t))) = set.join_next().await {
-            got[i] = t.ok().map(Track::from); // unavailable tracks just drop out
-        }
-        if !each(got.into_iter().flatten().collect(), uris.len()) { break }
+        from += items.len();
+        if items.is_empty() || (total > 0 && from >= total) { return Ok(()) }
     }
-    Ok(())
+}
+
+/// Runs a session request, waiting out librespot's own rate limiter ("Resource has been exhausted") instead of
+/// failing: it refills at 10 requests a second, so a short wait always gets through.
+// ponytail: spots the limiter by its message text; if librespot rewords it, requests fail again as before
+// (songs drop out). Match its error kind if it ever exposes one.
+async fn patient<T, E: std::fmt::Display, F: std::future::Future<Output = Result<T, E>>>(mut call: impl FnMut() -> F) -> Result<T, E> {
+    for wait in [1, 1, 2, 2, 4, 4, 8] {
+        match call().await {
+            Err(e) if e.to_string().contains("exhausted") => tokio::time::sleep(Duration::from_secs(wait)).await,
+            done => return done,
+        }
+    }
+    call().await
 }
 
 impl From<metadata::Track> for Track {
@@ -325,6 +379,8 @@ impl From<metadata::Track> for Track {
             album: Album { id: t.album.id.to_id().ok(), name: t.album.name, images },
             duration_ms: t.duration.max(0) as u32,
             kind: "track".into(),
+            added: 0,
+            pos: 0,
         }
     }
 }
@@ -424,4 +480,15 @@ pub async fn session_album(session: &Session, id: &str) -> Result<Vec<Track>, St
     let album = metadata::Album::get(session, &uri).await.map_err(|e| format!("Album: {e}"))?;
     let uris: Vec<SpotifyUri> = album.tracks().cloned().collect();
     Ok(session_tracks(session, &uris).await)
+}
+
+#[test]
+fn patient_waits_out_the_limiter_and_passes_other_errors_straight_through() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let calls = std::cell::Cell::new(0);
+    let limited = rt.block_on(patient(|| { calls.set(calls.get() + 1); let n = calls.get(); async move { if n == 1 { Err("Resource has been exhausted") } else { Ok(n) } } }));
+    assert_eq!(limited, Ok(2)); // waited once, then got through
+    calls.set(0);
+    let other = rt.block_on(patient(|| { calls.set(calls.get() + 1); async { Err::<(), _>("not found") } }));
+    assert_eq!((other, calls.get()), (Err("not found"), 1)); // no retry for real errors
 }

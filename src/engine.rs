@@ -83,7 +83,11 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
         ctx.request_repaint();
         url = page.next;
     }
-    tokio::spawn(load_liked(state.clone(), engine.web.clone(), engine.http.clone(), ctx.clone()));
+    // Hearts come from ~/.resona/liked, refreshed whenever Liked Songs is opened; only a first run reads it all.
+    match load_liked_ids() {
+        Some(ids) => { let mut s = state.lock().unwrap(); (s.liked, s.liked_complete) = (ids, true) }
+        None => { tokio::spawn(load_liked(state.clone(), engine.web.clone(), engine.http.clone(), ctx.clone())); }
+    }
     let _ = slot.set(engine);
     set("");
 
@@ -109,12 +113,10 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
                 // Spotify won't play this one here (region, licensing). Remember it, say so, and keep going
                 // the way we were going, so "back" doesn't bounce off it forever.
                 let (from, dir) = (s.qi, if s.dir == 0 { 1 } else { s.dir });
-                if let Some(t) = s.now.clone() {
-                    s.notice = Some(format!("Spotify can't play \u{201c}{}\u{201d} here, skipped", t.name));
-                    if let Some(id) = t.id {
-                        remember_unplayable(&id);
-                        s.unplayable.insert(id);
-                    }
+                // No message: the song just fades in its list, like every refused one.
+                if let Some(id) = s.now.as_ref().and_then(|t| t.id.clone()) {
+                    remember_unplayable(&id);
+                    s.unplayable.insert(id);
                 }
                 if !s.step(&player, from, dir) { (s.pos_ms, s.since) = (0, None) }
             }
@@ -126,7 +128,8 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
 }
 
 /// Every liked track id, page by page, so lists can show hearts. Developer apps get 403 from Spotify's
-/// "which of these are liked?" lookup, so we read the whole Liked Songs list once instead.
+/// "which of these are liked?" lookup, so we read the whole Liked Songs list instead: on a first run only,
+/// then it's kept in ~/.resona/liked.
 pub async fn load_liked(state: Shared, web: Arc<api::WebAuth>, http: reqwest::Client, ctx: egui::Context) {
     let mut url = Some("me/tracks?limit=50".to_string());
     while let Some(u) = url {
@@ -136,6 +139,9 @@ pub async fn load_liked(state: Shared, web: Arc<api::WebAuth>, http: reqwest::Cl
         ctx.request_repaint();
         url = page.next;
     }
+    let mut s = state.lock().unwrap();
+    s.liked_complete = true;
+    save_liked_ids(&s.liked);
 }
 
 /// What's already in each of your own playlists, so the menu can tick them. Ids only, to keep it light.
@@ -161,4 +167,7 @@ pub async fn load_members(state: Shared, web: Arc<api::WebAuth>, http: reqwest::
 pub fn set_like(state: &Shared, id: &str, on: bool) {
     let mut s = state.lock().unwrap();
     if on { s.liked.insert(id.to_string()); } else { s.liked.remove(id); }
+    s.liked_edits += 1;
+    // A partial set (the first full read still going, or stopped) is never saved: it would pass for complete.
+    if s.liked_complete { save_liked_ids(&s.liked) }
 }

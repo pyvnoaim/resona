@@ -38,6 +38,7 @@ impl App {
                 &item("search", "Search Spotify", Some("CmdOrCtrl+F")),
                 &item("jump", "Jump to the Playing Song", Some("CmdOrCtrl+J")),
                 &item("focus", "Cover and Lyrics", Some("CmdOrCtrl+E")),
+                &item("sort", "Sort: List Order / Newest / Oldest Added", Some("CmdOrCtrl+O")),
                 &sep(),
                 &skins,
                 &themes,
@@ -90,6 +91,7 @@ impl App {
                 }
                 "jump" => self.jump_to_playing(ctx),
                 "focus" => self.big = !self.big,
+                "sort" => self.state.lock().unwrap().cycle_sort(),
                 "settings" => ctx.data_mut(|d| d.insert_temp(egui::Id::new("open-menu"), true)),
                 "like" => if let Some(id) = now_id { self.toggle_like(id) },
                 "copy" => if let Some(id) = now_id { ctx.copy_text(format!("https://open.spotify.com/track/{id}")) },

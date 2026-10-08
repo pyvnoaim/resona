@@ -20,10 +20,11 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 |---|---|
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, volume, last open list, `cli_style` |
+| `settings` | `key=value`: skin, theme, volume, last open list, `sort`, `cli_style` |
 | `unplayable` | track ids Spotify refused to play, one per line |
+| `liked` | liked track ids, one per line: the hearts, refreshed whenever Liked Songs is opened |
 
-Delete the first two to sign in again.
+Delete the first two to sign in again (and `liked` too when switching accounts: it holds that account's hearts).
 
 ## Layout
 
@@ -52,7 +53,11 @@ font's default instance.
   scope to `SCOPES` forces one new browser sign-in.
 - **The Web API is restricted for developer apps**, so several things go through the librespot session instead:
   playlists you don't own (`Playlist::web_readable` decides), artist pages and album pages. Liked hearts come from
-  reading all of Liked Songs once at startup (`load_liked`), because the "are these liked?" lookup is 403.
+  `~/.resona/liked`, refreshed whenever Liked Songs loads (it's read in full then anyway) and on every like; only a
+  first run reads it all up front (`load_liked`), because the old "are these liked?" lookup
+  (`/me/tracks/contains`) was 403. Its replacement, `GET /me/library/contains`, is untried.
+- **Sort:** songs keep when they were added (`Track.added`, never shown) and their list position (`pos`); every
+  loader hands songs to `State::add_tracks`, which numbers and sorts them. Lists without dates ignore the sort.
 - **Refused songs:** librespot reports `Unavailable` for failed *preloads* too; only a failure of the playing track
   counts. Refused songs are skipped in the direction you were going and faded in lists; clicking one retries it.
 - **One way to drive playback:** buttons, media keys, the menu bar and the keyboard all call `command()` (the CLI too).
@@ -61,6 +66,13 @@ font's default instance.
 - **Queue:** `queue` is the list being played (shuffled or not), `base` its original order, `queued` the hand-added
   songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded.
 - **Rate limits:** `api::get` retries short `retry-after` waits and turns anything over 60s into an error.
+  librespot has its own limiter too: 300 session requests per 30 s, then 10/s, shared with playback. Session
+  loaders go through `api::patient` (waits it out) and `session_playlist` paces itself past 200 songs; a starved
+  player reports a playable song as `Unavailable`.
+- **Spotify's February 2026 Web API changes:** saving and liking go through `/me/library` (by URI), playlist
+  contents through `/playlists/{id}/items`, search pages are 10. Check the changelog before adding an endpoint.
+- **Session playlists** are read page by page (`/playlist/v2/playlist/{id}?from=&length=`): librespot's
+  `Playlist::get` returns only the first part of a long list.
   Developer apps get day-long bans for bursts, so startup stays small: playlists and Liked Songs only; what's in
   each playlist (`load_members`) waits for the first "Add to playlist" menu. A failed library load is shown, not
   fatal: playback runs on librespot and keeps working through a ban, and the sidebar falls back to the session's
