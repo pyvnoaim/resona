@@ -12,6 +12,9 @@
 
 ## Ideas
 
+- [ ] Rename the Spotify developer app to "Sonus" (dashboard, by hand): its name shows on the sign-in page.
+- [ ] Bundle `Sonus.app`: pixel speaker as `.icns` (iconutil), Info.plist, copy to /Applications for Dock + Spotlight.
+
 - [ ] Spotify Connect (control from the phone, hand playback over); librespot supports it.
 - [ ] Filter box for the open playlist (search only covers all of Spotify right now).
 - [ ] Clicking the artist or cover in the focus view could open the artist / album page.
