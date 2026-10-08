@@ -69,7 +69,15 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
         // A failed load (a rate-limit ban, say) is shown but not fatal: playback works without the Web API.
         let page = match api::get::<api::Page<api::Playlist>>(&engine.web, &engine.http, &u).await {
             Ok(page) => page,
-            Err(e) => { state.lock().unwrap().error = Some(e); break }
+            Err(e) => {
+                // The same list through the session, which bans don't touch; the error still says why covers are missing.
+                let e = match api::session_playlists(&engine.session).await {
+                    Ok(all) => { state.lock().unwrap().playlists = all; e }
+                    Err(also) => format!("{e}; {also}"),
+                };
+                state.lock().unwrap().error = Some(e);
+                break;
+            }
         };
         state.lock().unwrap().playlists.extend(page.items);
         ctx.request_repaint();

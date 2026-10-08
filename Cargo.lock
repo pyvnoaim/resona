@@ -4046,6 +4046,7 @@ dependencies = [
  "librespot",
  "librespot-oauth",
  "muda",
+ "protobuf",
  "reqwest",
  "serde",
  "serde_json",

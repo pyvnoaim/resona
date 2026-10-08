@@ -237,6 +237,52 @@ fn entry_accepts_both_shapes_and_skips_episodes() {
     assert_eq!(tracks[0].thumb(), Some("small"));
 }
 
+/// Your playlists as the official client lists them (the rootlist), through the session: the sidebar's
+/// fallback when the Web API refuses (a rate-limit ban). No covers, and no owner id, so `web_readable` is
+/// false and they open through the session too.
+pub async fn session_playlists(session: &Session) -> Result<Vec<Playlist>, String> {
+    use librespot::protocol::playlist4_external::SelectedListContent;
+    use protobuf::Message;
+    // ponytail: one page of 500 entries (folder markers count); page with `from` if a library ever outgrows it.
+    let bytes = session.spclient().get_rootlist(0, Some(500)).await.map_err(|e| format!("Your playlists: {e}"))?;
+    let list = SelectedListContent::parse_from_bytes(&bytes).map_err(|e| format!("Your playlists: {e}"))?;
+    rootlist_playlists(&list).ok_or_else(|| "Your playlists: names and lists don't line up".to_string())
+}
+
+/// The playlists in a decorated rootlist: each item's name sits in the meta item at the same position, so a
+/// mismatch in count is refused rather than putting names on the wrong lists.
+fn rootlist_playlists(list: &librespot::protocol::playlist4_external::SelectedListContent) -> Option<Vec<Playlist>> {
+    let contents = list.contents.get_or_default();
+    if contents.items.len() != contents.meta_items.len() { return None }
+    Some(contents.items.iter().zip(&contents.meta_items).filter_map(|(item, meta)| {
+        let id = item.uri().strip_prefix("spotify:playlist:")?; // folders are start-group / end-group items
+        // No owner: the rootlist only has account ids, not names.
+        Some(Playlist { id: id.into(), name: meta.attributes.name().into(), images: None, owner: None, collaborative: false })
+    }).collect())
+}
+
+#[test]
+fn rootlist_keeps_playlists_skips_folders_and_never_reads_as_web_readable() {
+    use librespot::protocol::playlist4_external::{Item, MetaItem, SelectedListContent};
+    let mut list = SelectedListContent::new();
+    let contents = list.contents.mut_or_insert_default();
+    for (uri, name, owner) in [("spotify:start-group:abc:Folder", "", ""), ("spotify:playlist:p1", "lamp", "pyvno"), ("spotify:end-group:abc", "", "")] {
+        let mut item = Item::new();
+        item.set_uri(uri.into());
+        contents.items.push(item);
+        let mut meta = MetaItem::new();
+        meta.attributes.mut_or_insert_default().set_name(name.into());
+        meta.set_owner_username(owner.into());
+        contents.meta_items.push(meta);
+    }
+    let got = rootlist_playlists(&list).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!((got[0].id.as_str(), got[0].name.as_str()), ("p1", "lamp"));
+    assert!(!got[0].web_readable("pyvno")); // opens through the session, which bans don't touch
+    list.contents.mut_or_insert_default().meta_items.pop();
+    assert!(rootlist_playlists(&list).is_none()); // names that don't line up are refused, not shifted
+}
+
 /// Tracks of a playlist someone else owns, read through the session like the official client does.
 /// Hands them over `CHUNK` at a time with the playlist's track count; stops early when `each` returns false (the user moved on).
 pub async fn session_playlist(session: &Session, id: &str, mut each: impl FnMut(Vec<Track>, usize) -> bool) -> Result<(), String> {

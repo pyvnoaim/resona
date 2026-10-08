@@ -69,4 +69,9 @@ codesign --force --deep -s - "$app"
 rm -rf /Applications/Resona.app
 mv "$app" /Applications/   # move, not copy: a second copy in target/ shows up in Spotlight
 touch /Applications/Resona.app   # nudge Finder/Dock to pick up the new icon
-echo "installed /Applications/Resona.app"
+# `resona` in any terminal starts the terminal player from the installed app.
+mkdir -p ~/.local/bin
+printf '#!/bin/sh\nexec /Applications/Resona.app/Contents/MacOS/resona cli "$@"\n' > ~/.local/bin/resona
+chmod +x ~/.local/bin/resona
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: add ~/.local/bin to your PATH to run \`resona\` anywhere" ;; esac
+echo "installed /Applications/Resona.app, and \`resona\` in ~/.local/bin"

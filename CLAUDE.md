@@ -20,7 +20,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 |---|---|
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, volume, last open list |
+| `settings` | `key=value`: skin, theme, volume, last open list, `cli_style` |
 | `unplayable` | track ids Spotify refused to play, one per line |
 
 Delete the first two to sign in again.
@@ -30,7 +30,7 @@ Delete the first two to sign in again.
 | file | what |
 |---|---|
 | `src/main.rs` | `App` (UI state), startup, `open_list()` (load a list), `command()` (all playback), the frame loop |
-| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand in devboard's style) on the same engine, `open_list` and `command` |
+| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand; `t` switches a flow-style card and a devboard-style board) on the same engine, `open_list` and `command` |
 | `src/state.rs` | `State` and the queue: `Source`, `Cmd`, `Repeat`, `start` / `step` / `enqueue` / `set_shuffle` |
 | `src/engine.rs` | librespot: `connect()` (sign-in, session, player, event loop), liked-songs and playlist-contents loaders |
 | `src/api.rs` | Web API (`get`, `WebAuth`, search, like, add to playlist) and the session loaders (`session_playlist`, `session_artist`, `session_album`) |
@@ -63,7 +63,8 @@ font's default instance.
 - **Rate limits:** `api::get` retries short `retry-after` waits and turns anything over 60s into an error.
   Developer apps get day-long bans for bursts, so startup stays small: playlists and Liked Songs only; what's in
   each playlist (`load_members`) waits for the first "Add to playlist" menu. A failed library load is shown, not
-  fatal: playback runs on librespot and keeps working through a ban.
+  fatal: playback runs on librespot and keeps working through a ban, and the sidebar falls back to the session's
+  rootlist (`session_playlists`: no covers, and every list then opens through the session).
 - **Search** asks for pages of 10 and stops at 5 pages; newer developer apps get a lower page-size cap.
 - **Repaints:** nothing redraws when idle; 4 fps while playing, 20 fps while the equaliser bars or meter are on
   screen, ~16 fps while a list is loading.

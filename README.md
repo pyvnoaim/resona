@@ -43,8 +43,8 @@ Use the release build: the debug build decodes audio too slowly.
 To install it as an app (Dock, Spotlight), run `./bundle.sh`: it builds `Resona.app` with its icon and moves it
 into `/Applications`. Run it again after each change.
 
-`./target/release/resona cli` runs the same player full-screen in the terminal: arrows to move, tab to switch
-between your lists and the songs, enter to play, `/` to search, `q` to quit.
+`resona` (installed into `~/.local/bin` by `bundle.sh`) runs the same player full-screen in the terminal: arrows to move, tab to switch
+between your lists and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit.
 
 On first launch the browser opens twice to sign in, once for playback and once for the Web API.
 Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `web_refresh_token` there

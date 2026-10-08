@@ -13,13 +13,17 @@ use crossterm::{
 };
 use eframe::egui;
 use librespot::playback::mixer::Mixer;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{command, engine::*, open_list, settings::*, state::*, ui::short_err};
 
 type C = (u8, u8, u8);
+const BG: C = (0x1a, 0x1d, 0x23);
+const RULE: C = (0x2c, 0x31, 0x3a);
 const PANEL: C = (0x1e, 0x21, 0x28);
-const CURSOR: C = (0x25, 0x2b, 0x35);
+/// The selected row: clearly lit in the focused pane, a softer `DULL` in the other.
+const CURSOR: C = (0x4a, 0x1d, 0x23);
+const DULL: C = (0x2e, 0x21, 0x26);
 const FG: C = (0xc9, 0xd1, 0xd9);
 const DIM: C = (0x6b, 0x72, 0x80);
 const SUB: C = (0x5f, 0x67, 0x73);
@@ -29,11 +33,16 @@ const RED: C = (0xe0, 0x28, 0x2e);
 
 const KEYS: &[(&str, &str)] = &[
     ("↑↓", "move"), ("tab", "pane"), ("enter", "play"), ("/", "search"), ("q", "quit"),
-    ("space", "pause"), ("n b", "next / back"), ("←→", "seek"), ("+-", "volume"), ("s", "shuffle"), ("r", "repeat"),
+    ("space", "pause"), ("n b", "next / back"), ("←→", "seek"), ("+-", "volume"), ("s", "shuffle"), ("r", "repeat"), ("t", "style"),
 ];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pane { Lists, Songs }
+
+/// `t` switches: a centred card of titled boxes on the terminal's own background (like flow), or a full-width
+/// painted board (like devboard). Remembered as `cli_style` in ~/.resona/settings.
+#[derive(Clone, Copy, PartialEq)]
+enum Style { Card, Board }
 
 struct Tui {
     pane: Pane,
@@ -48,6 +57,7 @@ struct Tui {
     /// The list we last drew, so a newly opened one starts at its top.
     seen: Option<Source>,
     body_h: usize,
+    style: Style,
 }
 
 pub fn run() {
@@ -68,6 +78,7 @@ pub fn run() {
 
     let mut ui = Tui {
         pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1,
+        style: if setting("cli_style").as_deref() == Some("board") { Style::Board } else { Style::Card },
         volume: setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7),
     };
     let mut restored = false;
@@ -146,24 +157,28 @@ impl Tui {
             KeyCode::Right => cmd(Cmd::SeekBy(10_000)),
             KeyCode::Left => cmd(Cmd::SeekBy(-10_000)),
             KeyCode::Char(c @ ('+' | '=' | '-')) => {
-                self.volume = (self.volume + if c == '-' { -0.05 } else { 0.05 }).clamp(0.0, 1.0);
+                // Whole 5% steps, like the window's arrow keys: 54% goes up to 60, down to 50.
+                self.volume = ((self.volume + if c == '-' { -0.05 } else { 0.05 }) * 20.0).round().clamp(0.0, 20.0) / 20.0;
                 e.mixer.set_volume((self.volume * u16::MAX as f32) as u16);
                 set_setting("volume", &format!("{:.2}", self.volume));
             }
             KeyCode::Char('s') => state.lock().unwrap().toggle_shuffle(),
             KeyCode::Char('r') => state.lock().unwrap().cycle_repeat(),
             KeyCode::Char('/') => self.search = Some(String::new()),
+            KeyCode::Char('t') => {
+                self.style = if self.style == Style::Card { Style::Board } else { Style::Card };
+                set_setting("cli_style", if self.style == Style::Board { "board" } else { "card" });
+            }
             _ => {}
         }
         true
     }
 
-    /// The whole screen, every cell, as one write: a centred card of boxes on the terminal's own background.
+    /// The whole screen, every cell, as one write.
     fn draw(&mut self, s: &State, w: usize, h: usize) -> String {
-        let blank = || Seg::new(w, None).done();
         if w < 60 || h < 18 {
             let mut lines = vec![center(&[("make the window a little bigger".into(), DIM)], w)];
-            lines.resize_with(h, blank);
+            lines.resize_with(h, || Seg::new(w, None).done());
             return frame(lines);
         }
         let lists = lists_of(s);
@@ -174,14 +189,24 @@ impl Tui {
         }
         self.side = self.side.min(lists.len().saturating_sub(1));
         self.row = self.row.min(s.tracks.len().saturating_sub(1));
+        // The library is as wide as its longest name, within reason.
+        let longest = lists.iter().map(|(_, n)| n.width()).max().unwrap_or(0);
+        match self.style {
+            Style::Card => self.card(s, &lists, longest, w, h),
+            Style::Board => self.board(s, &lists, longest, w, h),
+        }
+    }
 
-        let cw = (w - 2).min(120);
+    /// A centred card of titled boxes on the terminal's own background, filling the window.
+    fn card(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> String {
+        let blank = || Seg::new(w, None).done();
+        let cw = (w - 4).min(220);
         let x0 = (w - cw) / 2;
         let line = |content: String| format!("{}{content}{}", Seg::new(x0, None).done(), Seg::new(w - x0 - cw, None).done());
-        let body_h = (h - 14).min(36);
+        let body_h = h - 14;
         self.body_h = body_h;
         let mut lines: Vec<String> = Vec::with_capacity(h);
-        for _ in 0..(h - 12 - body_h) / 2 { lines.push(blank()) }
+        lines.push(blank());
 
         // Brand, then whatever the engine has to say.
         lines.push(line(center(&[("resona".into(), FG), (concat!("  v", env!("CARGO_PKG_VERSION")).into(), GUTTER)], cw)));
@@ -194,7 +219,7 @@ impl Tui {
         lines.push(line(center(&note, cw)));
 
         // Lists and songs, side by side; the focused box is the red one.
-        let lw = (cw / 4).clamp(20, 32);
+        let lw = (longest + 4).clamp(22, (cw / 3).max(22));
         let rw = cw - lw - 1;
         let edge = |pane| if self.pane == pane { RED } else { FAINT };
         let count = match (s.loading, s.expected) {
@@ -204,20 +229,21 @@ impl Tui {
         };
         lines.push(line(format!("{} {}",
             top(lw, edge(Pane::Lists), &[("library".into(), FG)], &[(lists.len().to_string(), DIM)]),
-            top(rw, edge(Pane::Songs), &[(title(s, &lists), FG)], &[(count, DIM)]))));
+            top(rw, edge(Pane::Songs), &[(title(s, lists), FG)], &[(count, DIM)]))));
         scroll(&mut self.side_top, self.side, body_h);
         scroll(&mut self.row_top, self.row, body_h);
         let now_id = s.now.as_ref().and_then(|t| t.id.as_ref());
         let num_w = s.tracks.len().max(10).to_string().len();
         let rest = (rw - 4).saturating_sub(num_w + 2 + 2 + 6);
         let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
-        let cursor_bg = |on: bool, pane| if !on { None } else if self.pane == pane { Some(CURSOR) } else { Some(PANEL) };
+        let cursor_bg = |on: bool, pane| if !on { None } else if self.pane == pane { Some(CURSOR) } else { Some(DULL) };
         for i in 0..body_h {
             let mut left = Seg::new(lw - 4, None);
             if let Some((src, name)) = lists.get(self.side_top + i) {
                 let open = s.view.as_ref() == Some(src);
-                left = Seg::new(lw - 4, cursor_bg(self.side_top + i == self.side, Pane::Lists));
-                left.put(name, if open { RED } else { DIM });
+                let sel = self.side_top + i == self.side;
+                left = Seg::new(lw - 4, cursor_bg(sel, Pane::Lists));
+                left.put(name, if open { RED } else if sel { FG } else { DIM });
             }
             let at = self.row_top + i;
             let mut right = Seg::new(rw - 4, None);
@@ -225,11 +251,13 @@ impl Tui {
                 let playing = t.id.is_some() && t.id.as_ref() == now_id;
                 let gone = t.id.as_ref().is_some_and(|id| s.unplayable.contains(id));
                 let liked = t.id.as_ref().is_some_and(|id| s.liked.contains(id));
+                let sel = at == self.row;
+                let (fg, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
                 let num = if playing { "▶".to_string() } else { (at + 1).to_string() };
-                right = Seg::new(rw - 4, cursor_bg(at == self.row, Pane::Songs));
-                right.col(&format!("{num:>num_w$}"), if playing { RED } else { GUTTER }, num_w + 2)
-                    .col(&t.name, if gone { FAINT } else if playing { RED } else { FG }, name_w)
-                    .col(&t.artist_line(), if gone { FAINT } else { SUB }, artist_w)
+                right = Seg::new(rw - 4, cursor_bg(sel, Pane::Songs));
+                right.col(&format!("{num:>num_w$}"), if playing { RED } else if sel { fg } else { GUTTER }, num_w + 2)
+                    .col(&t.name, if playing { RED } else if gone { fg } else { FG }, name_w)
+                    .col(&t.artist_line(), if gone { fg } else { sub }, artist_w)
                     .col(if liked { "♥" } else { "" }, RED, 2)
                     .right(&[(clock(t.duration_ms), DIM)], 0);
             } else if i == 0 && s.tracks.is_empty() {
@@ -283,6 +311,116 @@ impl Tui {
             }
         }
         lines.resize_with(h, blank);
+        frame(lines)
+    }
+
+    /// Full width on a painted background: a header, lists and songs, the player, the keys.
+    fn board(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> String {
+        let mut lines = Vec::with_capacity(h);
+        let inner = w - 4;
+        let rule = || Seg::new(w, Some(BG)).pad(2).put(&"─".repeat(inner), RULE).done();
+
+        // Header: brand hard left, what's open hard right.
+        lines.push(Seg::new(w, Some(BG)).done());
+        let mut status: Vec<(String, C)> = Vec::new();
+        if let Some(err) = &s.error { status.push((format!("{}  ·  ", short_err(err)), RED)) }
+        if !s.status.is_empty() {
+            status.push((s.status.clone(), DIM));
+        } else {
+            status.push((title(s, lists), DIM));
+            let count = match (s.loading, s.expected) {
+                (true, Some(n)) => format!("loading {}/{n}", s.tracks.len()),
+                (true, None) => "loading…".into(),
+                _ => format!("{} songs", s.tracks.len()),
+            };
+            status.push((format!("  ·  {count}"), SUB));
+            if let Some(n) = &s.notice { status.push((format!("  ·  {n}"), SUB)) }
+        }
+        let mut head = Seg::new(w, Some(BG));
+        head.pad(2).put("▌ ", RED).put("resona", FG).put(concat!(" v", env!("CARGO_PKG_VERSION")), GUTTER);
+        lines.push(head.right(&status, 2).done());
+        lines.push(rule());
+
+        // Body: lists on the left, songs on the right. The bar only marks what's open and what's playing.
+        let body_h = h - 6;
+        self.body_h = body_h;
+        let lw = (longest + 2).clamp(18, (inner / 3).max(18));
+        let rw = inner - lw - 3;
+        scroll(&mut self.side_top, self.side, body_h);
+        scroll(&mut self.row_top, self.row, body_h);
+        let now_id = s.now.as_ref().and_then(|t| t.id.as_ref());
+        let num_w = s.tracks.len().max(10).to_string().len();
+        let rest = rw.saturating_sub(2 + num_w + 2 + 2 + 6);
+        let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
+        let cursor_bg = |on: bool, pane| Some(if !on { BG } else if self.pane == pane { CURSOR } else { DULL });
+        for i in 0..body_h {
+            let mut left = Seg::new(lw, Some(BG));
+            if let Some((src, name)) = lists.get(self.side_top + i) {
+                let open = s.view.as_ref() == Some(src);
+                let sel = self.side_top + i == self.side;
+                left = Seg::new(lw, cursor_bg(sel, Pane::Lists));
+                left.put(if open { "▌ " } else { "  " }, RED).put(name, if open || sel { FG } else { DIM });
+            }
+            let at = self.row_top + i;
+            let mut right = Seg::new(rw, Some(BG));
+            if let Some(t) = s.tracks.get(at) {
+                let playing = t.id.is_some() && t.id.as_ref() == now_id;
+                let gone = t.id.as_ref().is_some_and(|id| s.unplayable.contains(id));
+                let liked = t.id.as_ref().is_some_and(|id| s.liked.contains(id));
+                let sel = at == self.row;
+                let (fg, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
+                right = Seg::new(rw, cursor_bg(sel, Pane::Songs));
+                right.put(if playing { "▌ " } else { "  " }, RED)
+                    .col(&format!("{:>num_w$}", at + 1), if playing { RED } else { fg }, num_w + 2)
+                    .col(&t.name, if gone { fg } else { FG }, name_w)
+                    .col(&t.artist_line(), if gone { fg } else { sub }, artist_w)
+                    .col(if liked { "♥" } else { "" }, RED, 2)
+                    .right(&[(clock(t.duration_ms), DIM)], 0);
+            } else if i == 0 && s.tracks.is_empty() {
+                right.pad(2).put(if s.loading || s.view.is_none() { "…" } else { "nothing here" }, FAINT);
+            }
+            lines.push(format!("{}{}{}{}{}", Seg::new(2, Some(BG)).done(), left.done(), Seg::new(3, Some(BG)).done(), right.done(), Seg::new(2, Some(BG)).done()));
+        }
+
+        // Player: the song left, where it is and how it's playing right.
+        lines.push(rule());
+        let mut right: Vec<(String, C)> = Vec::new();
+        if let Some(t) = &s.now {
+            let (pos, dur) = (s.position(), t.duration_ms.max(1));
+            let bar_w = (inner / 5).clamp(10, 40);
+            let filled = (pos as usize * bar_w / dur as usize).min(bar_w);
+            right.push((format!("{}  ", clock(pos)), DIM));
+            right.push(("━".repeat(filled), RED));
+            right.push(("─".repeat(bar_w - filled), RULE));
+            right.push((format!("  {}", clock(dur)), DIM));
+        }
+        for (on, label) in [(s.shuffle, "shuffle"), (s.repeat == Repeat::All, "repeat"), (s.repeat == Repeat::One, "repeat one")] {
+            if on { right.push((format!("   {label}"), SUB)) }
+        }
+        right.push((format!("   vol {:.0}%", self.volume * 100.0), DIM));
+        let mut player = Seg::new(w, Some(PANEL));
+        player.pad(2);
+        let room = player.room().saturating_sub(width(&right) + 4);
+        match &s.now {
+            Some(t) => {
+                let mut song = Seg::new(room, Some(PANEL));
+                song.put("▌ ", RED).put(if s.since.is_some() { "▶  " } else { "‖  " }, FG).put(&t.name, FG).put("  ", FG).put(&t.artist_line(), SUB);
+                player.raw(song.done(), room);
+            }
+            None => { player.put("  nothing playing", FAINT); }
+        }
+        lines.push(player.right(&right, 2).done());
+
+        // Keys, or the search being typed.
+        let mut keys = Seg::new(w, Some(BG));
+        keys.pad(2);
+        match &self.search {
+            Some(q) => { keys.put("/ ", RED).put(q, FG).put("▌", RED).put("   enter search   esc cancel", DIM); }
+            None => for (i, (k, label)) in KEYS.iter().enumerate() {
+                keys.put(if i == 0 { "" } else { "   " }, DIM).put(k, FG).put(" ", DIM).put(label, DIM);
+            },
+        }
+        lines.push(keys.done());
         frame(lines)
     }
 }
@@ -395,12 +533,12 @@ fn bg_code(bg: Option<C>) -> String {
 }
 
 /// A run of cells on one background, exactly `max` wide once done.
-struct Seg { out: String, used: usize, max: usize }
+struct Seg { out: String, used: usize, max: usize, bg: Option<C> }
 
 impl Seg {
     /// `bg` None keeps the terminal's own background.
     fn new(max: usize, bg: Option<C>) -> Self {
-        Seg { out: bg_code(bg), used: 0, max }
+        Seg { out: bg_code(bg), used: 0, max, bg }
     }
     fn room(&self) -> usize { self.max - self.used }
     fn put(&mut self, text: &str, c: C) -> &mut Self { self.put_in(text, c, self.room()) }
@@ -420,6 +558,13 @@ impl Seg {
         let n = n.min(self.room());
         self.out += &" ".repeat(n);
         self.used += n;
+        self
+    }
+    /// Another finished segment of `w` cells (with its own background), then back to ours.
+    fn raw(&mut self, seg: String, w: usize) -> &mut Self {
+        self.out += &seg;
+        self.out += &bg_code(self.bg);
+        self.used += w.min(self.room());
         self
     }
     /// `parts` flush right, `margin` cells from the edge.
