@@ -1,0 +1,381 @@
+//! The few Spotify Web API calls the library view needs.
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+use librespot::{
+    core::{SpotifyUri, session::Session},
+    metadata::{self, Metadata},
+};
+use librespot_oauth::{OAuthClient, OAuthClientBuilder};
+use serde::{Deserialize, de::DeserializeOwned};
+
+/// Your own app from developer.spotify.com, used only for the Web API (its redirect URI must match REDIRECT in main.rs).
+/// librespot's shared client ID works for playback but gets day-long rate-limit bans here.
+pub const WEB_CLIENT_ID: &str = "8abbb289e35c43b6977234abdd3520d3";
+const SCOPES: [&str; 7] = [
+    "user-library-read",
+    "user-library-modify",
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "playlist-modify-public",
+    "playlist-modify-private",
+    "user-read-private",
+];
+
+/// Web API access: one browser sign-in, then silent refreshes from a refresh token saved on disk.
+pub struct WebAuth {
+    client: OAuthClient,
+    refresh_file: PathBuf,
+    token: Mutex<Option<(String, Instant)>>,
+}
+
+impl WebAuth {
+    pub fn new(dir: &Path, redirect: &str) -> Result<Self, String> {
+        if WEB_CLIENT_ID.is_empty() {
+            return Err("No Spotify app client ID set (WEB_CLIENT_ID in src/api.rs)".into());
+        }
+        let client = OAuthClientBuilder::new(WEB_CLIENT_ID, redirect, SCOPES.to_vec()).open_in_browser().build().map_err(|e| e.to_string())?;
+        Ok(Self { client, refresh_file: dir.join("web_refresh_token"), token: Mutex::new(None) })
+    }
+
+    // ponytail: two callers racing an expiry both refresh; harmless, Spotify accepts either.
+    pub async fn token(&self) -> Result<String, String> {
+        if let Some((t, exp)) = self.token.lock().unwrap().clone() && exp > Instant::now() + Duration::from_secs(60) {
+            return Ok(t);
+        }
+        let saved = std::fs::read_to_string(&self.refresh_file).ok();
+        let refreshed = match saved {
+            // A sign-in from before we asked for more scopes refreshes fine but can't do everything: sign in again.
+            Some(r) => self.client.refresh_token_async(r.trim()).await.ok().filter(|t| SCOPES.iter().all(|s| t.scopes.iter().any(|g| g == s))),
+            None => None,
+        };
+        let fresh = match refreshed {
+            Some(t) => t,
+            None => self.client.get_access_token_async().await.map_err(|e| format!("Library sign-in failed: {e}"))?,
+        };
+        // A refresh may not hand out a new refresh token; then the saved one stays valid.
+        if !fresh.refresh_token.is_empty() {
+            save_private(&self.refresh_file, &fresh.refresh_token).map_err(|e| format!("Saving sign-in: {e}"))?;
+        }
+        *self.token.lock().unwrap() = Some((fresh.access_token.clone(), fresh.expires_at));
+        Ok(fresh.access_token)
+    }
+}
+
+/// Writes a secret readable only by you.
+fn save_private(path: &Path, data: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new();
+    f.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
+    f.open(path)?.write_all(data.as_bytes())
+}
+
+#[derive(Deserialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next: Option<String>,
+    #[serde(default)]
+    pub total: Option<usize>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Image {
+    pub url: String,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct Named {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub images: Option<Vec<Image>>,
+    pub owner: Option<Owner>,
+    #[serde(default)]
+    pub collaborative: bool,
+}
+
+/// GET /search?type=track: the tracks come wrapped one level deeper than other lists.
+#[derive(Deserialize)]
+pub struct Search {
+    pub tracks: Page<Track>,
+}
+
+/// Small pages (10): newer developer apps get a lower cap on search page size.
+pub fn search_url(query: &str) -> String {
+    reqwest::Url::parse_with_params("https://api.spotify.com/v1/search", [("q", query), ("type", "track"), ("limit", "10")]).unwrap().into()
+}
+
+impl Playlist {
+    /// The Web API only lists tracks of playlists you own or collaborate on (403 otherwise, for developer apps).
+    pub fn web_readable(&self, me: &str) -> bool {
+        self.collaborative || self.owner.as_ref().and_then(|o| o.id.as_deref()) == Some(me)
+    }
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Owner {
+    pub id: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct Album {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub images: Vec<Image>,
+}
+
+
+/// Lenient on purpose: playlists also hold episodes and local files.
+#[derive(Deserialize, Clone, Default)]
+pub struct Track {
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub artists: Vec<Named>,
+    #[serde(default)]
+    pub album: Album,
+    #[serde(default)]
+    pub duration_ms: u32,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+}
+
+impl Track {
+    pub fn artist_line(&self) -> String {
+        self.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+    }
+    /// Smallest cover, for list rows and the player bar.
+    pub fn thumb(&self) -> Option<&str> {
+        self.album.images.last().map(|i| i.url.as_str())
+    }
+}
+
+/// A playlist entry or saved track. Spotify names the field `track` or, on newer responses, `item`.
+#[derive(Deserialize)]
+pub struct Entry {
+    track: Option<Track>,
+    item: Option<Track>,
+}
+
+impl Entry {
+    pub fn playable(self) -> Option<Track> {
+        self.track.or(self.item).filter(|t| t.kind == "track" && t.id.is_some())
+    }
+}
+
+pub async fn get<T: DeserializeOwned>(auth: &WebAuth, http: &reqwest::Client, url: &str) -> Result<T, String> {
+    send(auth, http, reqwest::Method::GET, url, None).await?.json().await.map_err(|e| e.to_string())
+}
+
+/// Appends a track to one of your playlists.
+pub async fn add_to_playlist(auth: &WebAuth, http: &reqwest::Client, playlist: &str, track_id: &str) -> Result<(), String> {
+    let body = format!(r#"{{"uris":["spotify:track:{track_id}"]}}"#);
+    send(auth, http, reqwest::Method::POST, &format!("playlists/{playlist}/items"), Some(body)).await.map(drop)
+}
+
+/// Adds a track to Liked Songs, or removes it.
+pub async fn set_liked(auth: &WebAuth, http: &reqwest::Client, id: &str, on: bool) -> Result<(), String> {
+    let method = if on { reqwest::Method::PUT } else { reqwest::Method::DELETE };
+    send(auth, http, method, &format!("me/tracks?ids={id}"), None).await.map(drop)
+}
+
+/// One Web API call (with an optional JSON body), auth and rate-limit handling; errors for non-2xx answers.
+async fn send(auth: &WebAuth, http: &reqwest::Client, method: reqwest::Method, url: &str, json: Option<String>) -> Result<reqwest::Response, String> {
+    let url = if url.starts_with("http") { url.to_string() } else { format!("https://api.spotify.com/v1/{url}") };
+    loop {
+        let token = auth.token().await?;
+        let req = http.request(method.clone(), &url).bearer_auth(&token);
+        let req = match &json {
+            Some(body) => req.header("content-type", "application/json").body(body.clone()),
+            None => req.header("content-length", "0"),
+        };
+        let r = req.send().await.map_err(|e| e.to_string())?;
+        if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let wait: u64 = r.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(2);
+            // Short waits are retried quietly; long ones (the shared client ID gets day-long bans) become an error.
+            if wait > 60 {
+                let left = if wait >= 3600 { format!("{}h", wait.div_ceil(3600)) } else { format!("{}m", wait.div_ceil(60)) };
+                return Err(format!("Spotify rate limit, try again in {left}"));
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            continue;
+        }
+        return r.error_for_status().map_err(|e| e.to_string());
+    }
+}
+
+#[test]
+fn entry_accepts_both_shapes_and_skips_episodes() {
+    let page: Page<Entry> = serde_json::from_str(r#"{"next":null,"items":[
+        {"track":{"id":"a","name":"A","type":"track","duration_ms":1000,"artists":[{"name":"X"},{"name":"Y"}],"album":{"name":"Al","images":[{"url":"big"},{"url":"small"}]}}},
+        {"item":{"id":"b","name":"B","type":"track"}},
+        {"track":{"id":"c","name":"Pod","type":"episode"}},
+        {"track":{"id":null,"name":"Local","type":"track"}},
+        {"track":null}
+    ]}"#).unwrap();
+    let tracks: Vec<Track> = page.items.into_iter().filter_map(Entry::playable).collect();
+    assert_eq!(tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert_eq!(tracks[0].artist_line(), "X, Y");
+    assert_eq!(tracks[0].thumb(), Some("small"));
+}
+
+/// Tracks of a playlist someone else owns, read through the session like the official client does.
+/// Hands them over `CHUNK` at a time with the playlist's track count; stops early when `each` returns false (the user moved on).
+pub async fn session_playlist(session: &Session, id: &str, mut each: impl FnMut(Vec<Track>, usize) -> bool) -> Result<(), String> {
+    const CHUNK: usize = 25;
+    let uri = SpotifyUri::from_uri(&format!("spotify:playlist:{id}")).map_err(|e| e.to_string())?;
+    let list = metadata::Playlist::get(session, &uri).await.map_err(|e| format!("Playlist: {e}"))?;
+    let uris: Vec<SpotifyUri> = list.tracks().filter(|u| matches!(u, SpotifyUri::Track { .. })).cloned().collect();
+    for chunk in uris.chunks(CHUNK) {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, u) in chunk.iter().cloned().enumerate() {
+            let session = session.clone();
+            set.spawn(async move { (i, metadata::Track::get(&session, &u).await) });
+        }
+        let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
+        while let Some(Ok((i, t))) = set.join_next().await {
+            got[i] = t.ok().map(Track::from); // unavailable tracks just drop out
+        }
+        if !each(got.into_iter().flatten().collect(), uris.len()) { break }
+    }
+    Ok(())
+}
+
+impl From<metadata::Track> for Track {
+    fn from(t: metadata::Track) -> Self {
+        // Largest first, smallest last, like the Web API (`thumb()` takes the last one).
+        let rank = |s: &metadata::image::ImageSize| {
+            use metadata::image::ImageSize::*;
+            match s { SMALL => 0, DEFAULT => 1, LARGE => 2, XLARGE => 3 }
+        };
+        let mut covers: Vec<_> = t.album.covers.iter().collect();
+        covers.sort_by_key(|c| std::cmp::Reverse(rank(&c.size)));
+        let images = covers.into_iter()
+            .filter_map(|c| c.id.to_base16().ok())
+            .map(|hex| Image { url: format!("https://i.scdn.co/image/{hex}") })
+            .collect();
+        Track {
+            id: t.id.to_id().ok(),
+            name: t.name,
+            artists: t.artists.iter().map(|a| Named { id: a.id.to_id().ok(), name: a.name.clone() }).collect(),
+            album: Album { id: t.album.id.to_id().ok(), name: t.album.name, images },
+            duration_ms: t.duration.max(0) as u32,
+            kind: "track".into(),
+        }
+    }
+}
+
+#[test]
+fn only_own_or_collaborative_playlists_go_through_the_web_api() {
+    let p = |owner: &str, collaborative: bool| -> Playlist {
+        serde_json::from_value(serde_json::json!({"id": "x", "name": "n", "owner": {"id": owner}, "collaborative": collaborative})).unwrap()
+    };
+    assert!(p("me", false).web_readable("me"));
+    assert!(p("them", true).web_readable("me"));
+    assert!(!p("them", false).web_readable("me"));
+}
+
+#[test]
+fn search_url_encodes_the_query() {
+    assert_eq!(search_url("sigur rós & co"), "https://api.spotify.com/v1/search?q=sigur+r%C3%B3s+%26+co&type=track&limit=10");
+}
+
+/// Tracks by id through the session, 25 at a time in parallel, in the order given. Unplayable ones drop out.
+async fn session_tracks(session: &Session, uris: &[SpotifyUri]) -> Vec<Track> {
+    let mut out = Vec::with_capacity(uris.len());
+    for chunk in uris.chunks(25) {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, u) in chunk.iter().cloned().enumerate() {
+            let session = session.clone();
+            set.spawn(async move { (i, metadata::Track::get(&session, &u).await) });
+        }
+        let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
+        while let Some(Ok((i, t))) = set.join_next().await {
+            got[i] = t.ok().map(Track::from);
+        }
+        out.extend(got.into_iter().flatten());
+    }
+    out
+}
+
+/// The ~300px cover (Spotify's DEFAULT size) of a metadata album or artist, as a URL.
+fn cover_url(images: &metadata::image::Images) -> Option<String> {
+    use metadata::image::ImageSize::*;
+    let pick = images.iter().find(|i| i.size == DEFAULT).or_else(|| images.first())?;
+    Some(format!("https://i.scdn.co/image/{}", pick.id.to_base16().ok()?))
+}
+
+/// GET /artists/{id}: only its pictures are used (as the artist page's portrait).
+#[derive(Deserialize)]
+pub struct ArtistImages {
+    #[serde(default)]
+    pub images: Vec<Image>,
+}
+
+/// One album, EP or single on an artist page.
+#[derive(Clone)]
+pub struct Release {
+    pub id: String,
+    pub name: String,
+    pub year: i32,
+    pub kind: &'static str,
+    pub cover: Option<String>,
+}
+
+/// An artist page: portrait, top songs (for the account's country), and every album / EP / single,
+/// newest first. Through the session: the Web API's artist endpoints are hit and miss for developer apps.
+pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<String>, Vec<Track>, Vec<Release>), String> {
+    let uri = SpotifyUri::from_uri(&format!("spotify:artist:{id}")).map_err(|e| e.to_string())?;
+    let artist = metadata::Artist::get(session, &uri).await.map_err(|e| format!("Artist: {e}"))?;
+    // Spotify fills `portrait_group` more often than `portraits`; main.rs falls back to the Web API.
+    let portrait = cover_url(&artist.portrait_group).or_else(|| cover_url(&artist.portraits));
+    let top = session_tracks(session, &artist.top_tracks.for_country(&session.country()).0).await;
+    let ids: Vec<SpotifyUri> = artist.albums_current().chain(artist.singles_current()).chain(artist.compilations_current()).cloned().collect();
+    let mut releases = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(25) {
+        let mut set = tokio::task::JoinSet::new();
+        for u in chunk {
+            let (session, u) = (session.clone(), u.clone());
+            set.spawn(async move { metadata::Album::get(&session, &u).await });
+        }
+        while let Some(Ok(Ok(a))) = set.join_next().await {
+            use metadata::album::AlbumType::*;
+            releases.push(Release {
+                id: a.id.to_id().unwrap_or_default(),
+                year: a.date.year(),
+                kind: match a.album_type { SINGLE => "SINGLE", EP => "EP", COMPILATION => "COMPILATION", _ => "ALBUM" },
+                cover: cover_url(&a.covers),
+                name: a.name,
+            });
+        }
+    }
+    releases.sort_by(|a, b| b.year.cmp(&a.year).then(a.name.cmp(&b.name)));
+    releases.dedup_by(|a, b| a.id == b.id);
+    Ok((portrait, top, releases))
+}
+
+/// An album's tracks, in order, through the session.
+pub async fn session_album(session: &Session, id: &str) -> Result<Vec<Track>, String> {
+    let uri = SpotifyUri::from_uri(&format!("spotify:album:{id}")).map_err(|e| e.to_string())?;
+    let album = metadata::Album::get(session, &uri).await.map_err(|e| format!("Album: {e}"))?;
+    let uris: Vec<SpotifyUri> = album.tracks().cloned().collect();
+    Ok(session_tracks(session, &uris).await)
+}
