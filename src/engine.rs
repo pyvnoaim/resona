@@ -37,7 +37,7 @@ pub type Shared = Arc<Mutex<State>>;
 
 pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Context) -> Result<(), String> {
     let set = |s: &str| { state.lock().unwrap().status = s.into(); ctx.request_repaint(); };
-    let dir = std::env::home_dir().unwrap().join(".sonus");
+    let dir = std::env::home_dir().unwrap().join(".resona");
     // Saved reusable credentials, so the browser login only happens once.
     let cache = Cache::new(Some(&dir), None, None, None).map_err(|e| e.to_string())?;
     let creds = match cache.credentials() {
@@ -66,13 +66,16 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
     set("Loading your library…");
     let mut url = Some("me/playlists?limit=50".to_string());
     while let Some(u) = url {
-        let page: api::Page<api::Playlist> = api::get(&engine.web, &engine.http, &u).await?;
+        // A failed load (a rate-limit ban, say) is shown but not fatal: playback works without the Web API.
+        let page = match api::get::<api::Page<api::Playlist>>(&engine.web, &engine.http, &u).await {
+            Ok(page) => page,
+            Err(e) => { state.lock().unwrap().error = Some(e); break }
+        };
         state.lock().unwrap().playlists.extend(page.items);
         ctx.request_repaint();
         url = page.next;
     }
     tokio::spawn(load_liked(state.clone(), engine.web.clone(), engine.http.clone(), ctx.clone()));
-    tokio::spawn(load_members(state.clone(), engine.web.clone(), engine.http.clone(), engine.session.username()));
     let _ = slot.set(engine);
     set("");
 
@@ -128,13 +131,18 @@ pub async fn load_liked(state: Shared, web: Arc<api::WebAuth>, http: reqwest::Cl
 }
 
 /// What's already in each of your own playlists, so the menu can tick them. Ids only, to keep it light.
+/// Loaded the first time the menu opens: reading every playlist at startup ran into Spotify's rate limits.
 pub async fn load_members(state: Shared, web: Arc<api::WebAuth>, http: reqwest::Client, me: String) {
     let own: Vec<String> = state.lock().unwrap().playlists.iter().filter(|p| p.web_readable(&me)).map(|p| p.id.clone()).collect();
     for id in own {
         let mut url = Some(format!("playlists/{id}/items?limit=100&fields=next,items(track(id,type),item(id,type))"));
         while let Some(u) = url {
-            // ponytail: a playlist that fails to load just shows no ticks.
-            let Ok(page) = api::get::<api::Page<api::Entry>>(&web, &http, &u).await else { break };
+            // ponytail: a playlist that fails just shows no ticks; a rate limit stops the lot, until restart.
+            let page = match api::get::<api::Page<api::Entry>>(&web, &http, &u).await {
+                Ok(page) => page,
+                Err(e) if e.contains("rate limit") => return,
+                Err(_) => break,
+            };
             let ids = page.items.into_iter().filter_map(api::Entry::playable).filter_map(|t| t.id);
             state.lock().unwrap().members.entry(id.clone()).or_default().extend(ids);
             url = page.next;

@@ -1,4 +1,4 @@
-# Sonus
+# Resona
 
 A small native Spotify player for macOS: Rust, egui/eframe for the UI, librespot for sign-in and playback.
 Two skins, each with a dark and a light palette: **Wired** (Lain-style cyber/pixel, the default) and **Swiss**
@@ -7,12 +7,14 @@ Two skins, each with a dark and a light palette: **Wired** (Lain-style cyber/pix
 ## Build and run
 
 ```sh
-cargo build --release && ./target/release/sonus   # use release: debug decodes audio slowly
+cargo build --release && ./target/release/resona   # use release: debug decodes audio slowly
 cargo test
 cargo clippy --all-targets                            # keep it warning-free
+./bundle.sh                                           # Resona.app (icon, Info.plist) into /Applications
+./target/release/resona cli                           # the same player full-screen in the terminal
 ```
 
-Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~/.sonus/`:
+Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~/.resona/`:
 
 | file | what |
 |---|---|
@@ -27,14 +29,15 @@ Delete the first two to sign in again.
 
 | file | what |
 |---|---|
-| `src/main.rs` | `App` (UI state), startup, `open()` (load a list), `command()` (all playback), the frame loop |
+| `src/main.rs` | `App` (UI state), startup, `open_list()` (load a list), `command()` (all playback), the frame loop |
+| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand in devboard's style) on the same engine, `open_list` and `command` |
 | `src/state.rs` | `State` and the queue: `Source`, `Cmd`, `Repeat`, `start` / `step` / `enqueue` / `set_shuffle` |
 | `src/engine.rs` | librespot: `connect()` (sign-in, session, player, event loop), liked-songs and playlist-contents loaders |
 | `src/api.rs` | Web API (`get`, `WebAuth`, search, like, add to playlist) and the session loaders (`session_playlist`, `session_artist`, `session_album`) |
 | `src/ui.rs` | the views: sidebar, track list, player bar, focus view, help overlay, sign-in screen |
 | `src/controls.rs` | input: keyboard, macOS menu bar (`muda`), media keys / Now Playing (`souvlaki`) |
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
-| `src/settings.rs` | reading and writing `~/.sonus/settings` and `unplayable` |
+| `src/settings.rs` | reading and writing `~/.resona/settings` and `unplayable` |
 | `assets/` | bundled OFL fonts + licenses: DotGothic16 + VT323 (Wired), Archivo regular + extra-bold (Swiss) |
 
 The Archivo files are static instances baked from the variable font with fontTools: egui only reads a variable
@@ -52,12 +55,15 @@ font's default instance.
   reading all of Liked Songs once at startup (`load_liked`), because the "are these liked?" lookup is 403.
 - **Refused songs:** librespot reports `Unavailable` for failed *preloads* too; only a failure of the playing track
   counts. Refused songs are skipped in the direction you were going and faded in lists; clicking one retries it.
-- **One way to drive playback:** buttons, media keys, the menu bar and the keyboard all call `App::command`.
+- **One way to drive playback:** buttons, media keys, the menu bar and the keyboard all call `command()` (the CLI too).
   The menu bar owns the ⌘ shortcuts (`keys()` skips them when the menu exists, or they'd fire twice). Plain-key
   shortcuts (Space, S, R, …) are only named in menu titles: as menu key equivalents they'd fire while typing.
 - **Queue:** `queue` is the list being played (shuffled or not), `base` its original order, `queued` the hand-added
   songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded.
 - **Rate limits:** `api::get` retries short `retry-after` waits and turns anything over 60s into an error.
+  Developer apps get day-long bans for bursts, so startup stays small: playlists and Liked Songs only; what's in
+  each playlist (`load_members`) waits for the first "Add to playlist" menu. A failed library load is shown, not
+  fatal: playback runs on librespot and keeps working through a ban.
 - **Search** asks for pages of 10 and stops at 5 pages; newer developer apps get a lower page-size cap.
 - **Repaints:** nothing redraws when idle; 4 fps while playing, 20 fps while the equaliser bars or meter are on
   screen, ~16 fps while a list is loading.

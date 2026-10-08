@@ -1,6 +1,6 @@
-# Sonus
+# Resona
 
-*Latin: sound.* A small native Spotify player for macOS, written in Rust with
+*Latin: resound!* A small native Spotify player for macOS, written in Rust with
 [egui](https://github.com/emilk/egui) and [librespot](https://github.com/librespot-org/librespot).
 
 Two skins, each with a dark and a light theme:
@@ -35,13 +35,19 @@ Two skins, each with a dark and a light theme:
 
 ```sh
 cargo build --release
-./target/release/sonus
+./target/release/resona
 ```
 
 Use the release build: the debug build decodes audio too slowly.
 
+To install it as an app (Dock, Spotlight), run `./bundle.sh`: it builds `Resona.app` with its icon and moves it
+into `/Applications`. Run it again after each change.
+
+`./target/release/resona cli` runs the same player full-screen in the terminal: arrows to move, tab to switch
+between your lists and the songs, enter to play, `/` to search, `q` to quit.
+
 On first launch the browser opens twice to sign in, once for playback and once for the Web API.
-Everything Sonus stores lives in `~/.sonus/`. Delete `credentials.json` and `web_refresh_token` there
+Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `web_refresh_token` there
 to sign in again.
 
 ## License
@@ -49,4 +55,4 @@ to sign in again.
 MIT, see [LICENSE](LICENSE). The bundled fonts (DotGothic16, VT323, Archivo) are under the SIL Open Font
 License; their licenses are in `assets/`.
 
-Sonus is not affiliated with Spotify.
+Resona is not affiliated with Spotify.

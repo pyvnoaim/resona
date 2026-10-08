@@ -1,7 +1,8 @@
-//! sonus: a small native Spotify player. `App` holds the UI state and wires the pieces together;
+//! resona: a small native Spotify player. `App` holds the UI state and wires the pieces together;
 //! see CLAUDE.md for the map of modules.
 
 mod api;
+mod cli;
 mod controls;
 mod engine;
 mod settings;
@@ -96,140 +97,12 @@ impl App {
         app
     }
 
-    /// Switches the main view and streams that list in, page by page.
     fn open(&self, src: Source, ctx: &egui::Context) {
-        let Some(e) = self.engine.get() else { return };
-        {
-            let mut s = self.state.lock().unwrap();
-            if s.view.as_ref() == Some(&src) { return }
-            (s.view, s.loading, s.error, s.expected, s.notice, s.artist) = (Some(src.clone()), true, None, None, None, None);
-            s.tracks.clear();
-            if src == Source::Queue {
-                s.loading = false; // drawn straight from the play queue
-                return;
-            }
-        }
-        if let Some(key) = src.key() { set_setting("last", &key) }
-        let (state, web, http, ctx) = (self.state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
-        let me = e.session.username();
-        let foreign = match &src {
-            Source::Playlist(id) => self.state.lock().unwrap().playlists.iter().any(|p| &p.id == id && !p.web_readable(&me)),
-            _ => false,
-        };
-        if let (true, Source::Playlist(id)) = (foreign, src.clone()) {
-            let session = e.session.clone();
-            self.rt.spawn(async move {
-                let done = api::session_playlist(&session, &id, |tracks, total| {
-                    let mut s = state.lock().unwrap();
-                    if s.view.as_ref() != Some(&src) { return false } // user moved on
-                    s.expected = Some(total);
-                    s.tracks.extend(tracks);
-                    ctx.request_repaint();
-                    true
-                }).await;
-                {
-                    let mut s = state.lock().unwrap();
-                    if s.view.as_ref() == Some(&src) {
-                        (s.loading, s.error) = (false, done.err());
-                    }
-                }
-                ctx.request_repaint();
-            });
-            return;
-        }
-        if matches!(src, Source::Artist { .. } | Source::Album { .. }) {
-            // Artist and album pages come through the session, like the official client.
-            let session = e.session.clone();
-            self.rt.spawn(async move {
-                let got = match &src {
-                    Source::Artist { id, .. } => match api::session_artist(&session, id).await {
-                        Ok((portrait, top, releases)) => {
-                            // No photo in the session's artist record: ask the Web API (middle-sized image).
-                            let portrait = match portrait {
-                                Some(p) => Some(p),
-                                None => api::get::<api::ArtistImages>(&web, &http, &format!("artists/{id}")).await.ok()
-                                    .and_then(|a| a.images.get(1).or(a.images.first()).map(|i| i.url.clone())),
-                            };
-                            Ok((top, Some(ArtistPage { portrait, releases })))
-                        }
-                        Err(e) => Err(e),
-                    },
-                    Source::Album { id, .. } => api::session_album(&session, id).await.map(|t| (t, None)),
-                    _ => return,
-                };
-                let mut s = state.lock().unwrap();
-                if s.view.as_ref() != Some(&src) { return } // user moved on
-                match got {
-                    Ok((tracks, page)) => (s.tracks, s.artist) = (tracks, page),
-                    Err(e) => s.error = Some(e),
-                }
-                s.loading = false;
-                ctx.request_repaint();
-            });
-            return;
-        }
-        self.rt.spawn(async move {
-            let mut url = Some(match &src {
-                Source::Liked => "me/tracks?limit=50".to_string(),
-                Source::Playlist(id) => format!("playlists/{id}/items?limit=100"),
-                Source::Search(q) => api::search_url(q),
-                Source::Artist { .. } | Source::Album { .. } | Source::Queue => return,
-            });
-            let mut pages = 0;
-            while let Some(u) = url {
-                let page = match &src {
-                    Source::Search(_) => api::get::<api::Search>(&web, &http, &u).await
-                        .map(|r| (r.tracks.items, r.tracks.next, r.tracks.total.map(|t| t.min(50)))),
-                    _ => api::get::<api::Page<api::Entry>>(&web, &http, &u).await
-                        .map(|p| (p.items.into_iter().filter_map(api::Entry::playable).collect(), p.next, p.total)),
-                };
-                let mut s = state.lock().unwrap();
-                if s.view.as_ref() != Some(&src) { return } // user moved on
-                pages += 1;
-                match page {
-                    Ok((tracks, next, total)) => {
-                        s.expected = s.expected.or(total);
-                        s.tracks.extend(tracks);
-                        // Search pages are small; 5 of them is plenty, and keeps us off the rate limit.
-                        url = next.filter(|_| !matches!(src, Source::Search(_)) || pages < 5);
-                    }
-                    Err(e) => { s.error = Some(e); url = None; }
-                }
-                ctx.request_repaint();
-            }
-            state.lock().unwrap().loading = false;
-            ctx.request_repaint();
-        });
+        if let Some(e) = self.engine.get() { open_list(self.rt.handle(), e, &self.state, src, ctx) }
     }
 
-    /// Runs one playback command; buttons, media keys and the keyboard all come through here.
     fn command(&mut self, cmd: Cmd) {
-        let Some(e) = self.engine.get() else { return };
-        let mut s = self.state.lock().unwrap();
-        let pos = s.position();
-        let start_open_list = |s: &mut State| {
-            // Nothing loaded yet: play the open list from the top.
-            let (list, src) = (s.tracks.clone(), s.view.clone());
-            if !list.is_empty() { s.start(&e.player, list, None, src) }
-        };
-        match cmd {
-            Cmd::Toggle if s.now.is_none() => start_open_list(&mut s),
-            Cmd::Toggle => if s.since.is_some() { e.player.pause() } else { e.player.play() },
-            Cmd::Play if s.now.is_none() => start_open_list(&mut s),
-            Cmd::Play => e.player.play(),
-            Cmd::Pause => e.player.pause(),
-            Cmd::Next => { let from = s.qi; s.step(&e.player, from, 1); }
-            Cmd::Prev => {
-                // Like every player: restart the song unless we're at its very start.
-                let from = s.qi;
-                if pos > 3000 || !s.step(&e.player, from, -1) { e.player.seek(0) }
-            }
-            Cmd::SeekTo(ms) => e.player.seek(ms),
-            Cmd::SeekBy(d) => {
-                let dur = s.now.as_ref().map_or(0, |t| t.duration_ms) as i64;
-                e.player.seek((pos as i64 + d).clamp(0, dur.max(1) - 1) as u32);
-            }
-        }
+        if let Some(e) = self.engine.get() { command(e, &mut self.state.lock().unwrap(), cmd) }
     }
 
     fn set_volume(&mut self, v: f32) {
@@ -281,6 +154,13 @@ impl App {
         });
     }
 
+    /// Starts reading what's in your own playlists, once, for the ticks in "Add to playlist".
+    fn load_members(&self) {
+        let Some(e) = self.engine.get() else { return };
+        if std::mem::replace(&mut self.state.lock().unwrap().members_asked, true) { return }
+        self.rt.spawn(load_members(self.state.clone(), e.web.clone(), e.http.clone(), e.session.username()));
+    }
+
     /// Likes or unlikes a track: the heart flips at once, and flips back if Spotify says no.
     fn toggle_like(&self, id: String) {
         let Some(e) = self.engine.get() else { return };
@@ -300,12 +180,12 @@ impl App {
         if self.restored || self.engine.get().is_none() { return }
         self.restored = true;
         self.set_volume(self.volume);
-        if let Some(src) = setting("last").and_then(|k| Source::from_key(&k)) { self.open(src, ctx) }
+        self.open(setting("last").and_then(|k| Source::from_key(&k)).unwrap_or(Source::Liked), ctx);
     }
 
     /// "Song · Artist" in the window title (Dock, Mission Control, ⌘-Tab), sent only when it changes.
     fn window_title(&mut self, ctx: &egui::Context) {
-        let title = self.state.lock().unwrap().now.as_ref().map_or("sonus".to_string(), |t| format!("{} · {}", t.name, t.artist_line()));
+        let title = self.state.lock().unwrap().now.as_ref().map_or("resona".to_string(), |t| format!("{} · {}", t.name, t.artist_line()));
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -313,14 +193,11 @@ impl App {
     }
 
     fn toggle_shuffle(&mut self) {
-        let mut s = self.state.lock().unwrap();
-        let on = !s.shuffle;
-        s.set_shuffle(on);
+        self.state.lock().unwrap().toggle_shuffle()
     }
 
     fn cycle_repeat(&mut self) {
-        let mut s = self.state.lock().unwrap();
-        s.repeat = match s.repeat { Repeat::Off => Repeat::All, Repeat::All => Repeat::One, Repeat::One => Repeat::Off };
+        self.state.lock().unwrap().cycle_repeat()
     }
 
     /// Opens the list the playing song came from (if it isn't open) and scrolls to it.
@@ -332,6 +209,139 @@ impl App {
         self.big = false;
         if let Some(src) = src { self.open(src, ctx) }
         self.jump = id;
+    }
+}
+
+/// Switches the main view and streams that list in, page by page.
+pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: Source, ctx: &egui::Context) {
+    {
+        let mut s = state.lock().unwrap();
+        if s.view.as_ref() == Some(&src) { return }
+        (s.view, s.loading, s.error, s.expected, s.notice, s.artist) = (Some(src.clone()), true, None, None, None, None);
+        s.tracks.clear();
+        if src == Source::Queue {
+            s.loading = false; // drawn straight from the play queue
+            return;
+        }
+    }
+    if let Some(key) = src.key() { set_setting("last", &key) }
+    let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
+    let me = e.session.username();
+    let foreign = match &src {
+        Source::Playlist(id) => state.lock().unwrap().playlists.iter().any(|p| &p.id == id && !p.web_readable(&me)),
+        _ => false,
+    };
+    if let (true, Source::Playlist(id)) = (foreign, src.clone()) {
+        let session = e.session.clone();
+        rt.spawn(async move {
+            let done = api::session_playlist(&session, &id, |tracks, total| {
+                let mut s = state.lock().unwrap();
+                if s.view.as_ref() != Some(&src) { return false } // user moved on
+                s.expected = Some(total);
+                s.tracks.extend(tracks);
+                ctx.request_repaint();
+                true
+            }).await;
+            {
+                let mut s = state.lock().unwrap();
+                if s.view.as_ref() == Some(&src) {
+                    (s.loading, s.error) = (false, done.err());
+                }
+            }
+            ctx.request_repaint();
+        });
+        return;
+    }
+    if matches!(src, Source::Artist { .. } | Source::Album { .. }) {
+        // Artist and album pages come through the session, like the official client.
+        let session = e.session.clone();
+        rt.spawn(async move {
+            let got = match &src {
+                Source::Artist { id, .. } => match api::session_artist(&session, id).await {
+                    Ok((portrait, top, releases)) => {
+                        // No photo in the session's artist record: ask the Web API (middle-sized image).
+                        let portrait = match portrait {
+                            Some(p) => Some(p),
+                            None => api::get::<api::ArtistImages>(&web, &http, &format!("artists/{id}")).await.ok()
+                                .and_then(|a| a.images.get(1).or(a.images.first()).map(|i| i.url.clone())),
+                        };
+                        Ok((top, Some(ArtistPage { portrait, releases })))
+                    }
+                    Err(e) => Err(e),
+                },
+                Source::Album { id, .. } => api::session_album(&session, id).await.map(|t| (t, None)),
+                _ => return,
+            };
+            let mut s = state.lock().unwrap();
+            if s.view.as_ref() != Some(&src) { return } // user moved on
+            match got {
+                Ok((tracks, page)) => (s.tracks, s.artist) = (tracks, page),
+                Err(e) => s.error = Some(e),
+            }
+            s.loading = false;
+            ctx.request_repaint();
+        });
+        return;
+    }
+    rt.spawn(async move {
+        let mut url = Some(match &src {
+            Source::Liked => "me/tracks?limit=50".to_string(),
+            Source::Playlist(id) => format!("playlists/{id}/items?limit=100"),
+            Source::Search(q) => api::search_url(q),
+            Source::Artist { .. } | Source::Album { .. } | Source::Queue => return,
+        });
+        let mut pages = 0;
+        while let Some(u) = url {
+            let page = match &src {
+                Source::Search(_) => api::get::<api::Search>(&web, &http, &u).await
+                    .map(|r| (r.tracks.items, r.tracks.next, r.tracks.total.map(|t| t.min(50)))),
+                _ => api::get::<api::Page<api::Entry>>(&web, &http, &u).await
+                    .map(|p| (p.items.into_iter().filter_map(api::Entry::playable).collect(), p.next, p.total)),
+            };
+            let mut s = state.lock().unwrap();
+            if s.view.as_ref() != Some(&src) { return } // user moved on
+            pages += 1;
+            match page {
+                Ok((tracks, next, total)) => {
+                    s.expected = s.expected.or(total);
+                    s.tracks.extend(tracks);
+                    // Search pages are small; 5 of them is plenty, and keeps us off the rate limit.
+                    url = next.filter(|_| !matches!(src, Source::Search(_)) || pages < 5);
+                }
+                Err(e) => { s.error = Some(e); url = None; }
+            }
+            ctx.request_repaint();
+        }
+        state.lock().unwrap().loading = false;
+        ctx.request_repaint();
+    });
+}
+
+/// Runs one playback command; buttons, media keys and the keyboard all come through here.
+pub fn command(e: &Engine, s: &mut State, cmd: Cmd) {
+    let pos = s.position();
+    let start_open_list = |s: &mut State| {
+        // Nothing loaded yet: play the open list from the top.
+        let (list, src) = (s.tracks.clone(), s.view.clone());
+        if !list.is_empty() { s.start(&e.player, list, None, src) }
+    };
+    match cmd {
+        Cmd::Toggle if s.now.is_none() => start_open_list(s),
+        Cmd::Toggle => if s.since.is_some() { e.player.pause() } else { e.player.play() },
+        Cmd::Play if s.now.is_none() => start_open_list(s),
+        Cmd::Play => e.player.play(),
+        Cmd::Pause => e.player.pause(),
+        Cmd::Next => { let from = s.qi; s.step(&e.player, from, 1); }
+        Cmd::Prev => {
+            // Like every player: restart the song unless we're at its very start.
+            let from = s.qi;
+            if pos > 3000 || !s.step(&e.player, from, -1) { e.player.seek(0) }
+        }
+        Cmd::SeekTo(ms) => e.player.seek(ms),
+        Cmd::SeekBy(d) => {
+            let dur = s.now.as_ref().map_or(0, |t| t.duration_ms) as i64;
+            e.player.seek((pos as i64 + d).clamp(0, dur.max(1) - 1) as u32);
+        }
     }
 }
 
@@ -378,9 +388,15 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args().nth(1).as_deref() == Some("cli") {
+        cli::run();
+        return Ok(());
+    }
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]).with_min_inner_size([760.0, 480.0]).with_title("sonus"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]).with_min_inner_size([760.0, 480.0]).with_title("resona")
+            // Empty, or eframe swaps in its own default icon over the bundle's at runtime.
+            .with_icon(std::sync::Arc::new(egui::IconData::default())),
         ..Default::default()
     };
-    eframe::run_native("sonus", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native("resona", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

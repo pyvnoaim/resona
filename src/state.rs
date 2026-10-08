@@ -31,7 +31,7 @@ pub enum Source {
 }
 
 impl Source {
-    /// How it's remembered in ~/.sonus/settings ("last=").
+    /// How it's remembered in ~/.resona/settings ("last=").
     pub fn key(&self) -> Option<String> {
         match self {
             Source::Liked => Some("liked".into()),
@@ -95,6 +95,8 @@ pub struct State {
     pub dir: isize,
     /// Track ids in each of your own playlists (by playlist id), for the "Add to playlist" menu.
     pub members: HashMap<String, HashSet<String>>,
+    /// Set once `members` has been asked for (the first time the menu opens).
+    pub members_asked: bool,
     /// A short confirmation for the header ("Added to …"); cleared when another list opens.
     pub notice: Option<String>,
     /// Lyrics for one track id, for the big now-playing view.
@@ -186,6 +188,16 @@ impl State {
         let at = (self.qi + 1).min(self.queue.len());
         self.queue.splice(at..at, kept.iter().cloned());
         self.queued = kept.len();
+    }
+
+    pub fn toggle_shuffle(&mut self) {
+        let on = !self.shuffle;
+        self.set_shuffle(on);
+    }
+
+    /// Off → all → one → off.
+    pub fn cycle_repeat(&mut self) {
+        self.repeat = match self.repeat { Repeat::Off => Repeat::All, Repeat::All => Repeat::One, Repeat::One => Repeat::Off };
     }
 
     /// "Play next" (front of the hand queue) or "Add to queue" (its end). With nothing playing, it just plays.

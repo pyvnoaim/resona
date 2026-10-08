@@ -275,7 +275,7 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
             Skin::Wired => (skin::num(22.0), 52.0),
             Skin::Swiss => (skin::num(14.0), 44.0),
         };
-        ui.label(RichText::new("sonus").font(brand).color(p.dim));
+        ui.label(RichText::new("resona").font(brand).color(p.dim));
         let r = ui.add(egui::Label::new(RichText::new(msg).font(skin::title(size)).color(if error.is_some() { p.accent } else { p.text })).wrap());
         skin::cursor_after(ui, r.rect, 34.0);
         if let Some(stage) = stage {
@@ -299,7 +299,7 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
         if let Some(e) = error {
             ui.add_space(12.0);
             ui.add(egui::Label::new(RichText::new(format!("ERR: {}", short_err(e))).size(12.0).color(p.dim)).wrap()).on_hover_text(e);
-            ui.label(RichText::new("Restart sonus to try again.").size(12.0).color(p.dim));
+            ui.label(RichText::new("Restart resona to try again.").size(12.0).color(p.dim));
         }
     };
     body(ui);
@@ -317,7 +317,7 @@ impl App {
             };
             egui::Frame::new().inner_margin(margin).show(ui, |ui| {
                 if sk == Skin::Swiss {
-                    skin::section(ui, "Sonus");
+                    skin::section(ui, "Resona");
                     ui.add_space(4.0);
                 }
                 let r = skin::search_box(ui, &mut self.query);
@@ -454,6 +454,7 @@ impl App {
         };
         let kind = kind.as_str();
         let (mut clicked, mut like, mut add, mut enqueue) = (None, None, None, None);
+        let mut want_members = false;
         let (mut goto, mut play_all, mut hovered): (Option<Source>, Option<bool>, Option<api::Track>) = (None, None, None);
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
         let jump_row = self.jump.as_ref().and_then(|id| s.tracks.iter().position(|t| t.id.as_ref() == Some(id)));
@@ -710,6 +711,7 @@ impl App {
                                     ui.close();
                                 }
                                 ui.menu_button("Add to playlist", |ui| {
+                                    want_members = true;
                                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                                         for (pid, name) in &own {
                                             if s.members.get(pid).is_some_and(|m| m.contains(id)) {
@@ -769,6 +771,7 @@ impl App {
         self.hovered = hovered;
         if let Some(id) = like { self.toggle_like(id) }
         if let Some((playlist, name, track)) = add { self.add_to(playlist, name, track) }
+        if want_members { self.load_members() }
         if let Some(src) = goto { self.open(src, &ctx) }
     }
 

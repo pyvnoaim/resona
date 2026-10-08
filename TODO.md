@@ -2,7 +2,7 @@
 
 ## Known issues
 
-- [ ] The error screen says "Restart sonus to try again": add a retry instead.
+- [ ] The error screen says "Restart resona to try again": add a retry instead.
 - [ ] Track-row separators in Wired are drawn dot by dot (`Shape::dashed_line` with 1px dashes): thousands of
       shapes per frame with a full screen of rows. A solid faint line would be nearly free.
 - [ ] Dithered stand-in covers draw one quad per 2px cell (~4k for the 132px header). Bake a texture if they grow.
@@ -12,8 +12,7 @@
 
 ## Ideas
 
-- [ ] Rename the Spotify developer app to "Sonus" (dashboard, by hand): its name shows on the sign-in page.
-- [ ] Bundle `Sonus.app`: pixel speaker as `.icns` (iconutil), Info.plist, copy to /Applications for Dock + Spotlight.
+- [ ] Rename the Spotify developer app to "Resona" (dashboard, by hand): its name shows on the sign-in page.
 
 - [ ] Spotify Connect (control from the phone, hand playback over); librespot supports it.
 - [ ] Filter box for the open playlist (search only covers all of Spotify right now).

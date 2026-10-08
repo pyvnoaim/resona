@@ -1,4 +1,4 @@
-//! What survives a restart: ~/.sonus/settings (key=value) and ~/.sonus/unplayable.
+//! What survives a restart: ~/.resona/settings (key=value) and ~/.resona/unplayable.
 
 use std::collections::HashSet;
 
@@ -7,10 +7,10 @@ use eframe::egui;
 use crate::skin::{self, Skin};
 
 pub fn settings_path() -> std::path::PathBuf {
-    std::env::home_dir().unwrap().join(".sonus").join("settings")
+    std::env::home_dir().unwrap().join(".resona").join("settings")
 }
 
-/// One "key=value" setting from ~/.sonus/settings.
+/// One "key=value" setting from ~/.resona/settings.
 pub fn setting(key: &str) -> Option<String> {
     let text = std::fs::read_to_string(settings_path()).ok()?;
     text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(|v| v.trim().to_string())
@@ -42,10 +42,10 @@ pub fn load_settings(ctx: &egui::Context) {
     }
 }
 
-/// Songs Spotify refused, one id per line in ~/.sonus/unplayable, so they stay skipped next launch.
+/// Songs Spotify refused, one id per line in ~/.resona/unplayable, so they stay skipped next launch.
 pub fn remember_unplayable(id: &str) {
     use std::io::Write;
-    let path = std::env::home_dir().unwrap().join(".sonus").join("unplayable");
+    let path = std::env::home_dir().unwrap().join(".resona").join("unplayable");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{id}");
     }
@@ -54,11 +54,11 @@ pub fn remember_unplayable(id: &str) {
 /// Clicking a faded song gives it another chance: it leaves the list (and the file).
 pub fn forget_unplayable(set: &mut HashSet<String>, id: &str) {
     if !set.remove(id) { return }
-    let path = std::env::home_dir().unwrap().join(".sonus").join("unplayable");
+    let path = std::env::home_dir().unwrap().join(".resona").join("unplayable");
     let _ = std::fs::write(path, set.iter().map(|i| format!("{i}\n")).collect::<String>());
 }
 
 pub fn load_unplayable() -> HashSet<String> {
-    let path = std::env::home_dir().unwrap().join(".sonus").join("unplayable");
+    let path = std::env::home_dir().unwrap().join(".resona").join("unplayable");
     std::fs::read_to_string(path).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }

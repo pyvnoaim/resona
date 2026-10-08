@@ -16,7 +16,7 @@ impl App {
         let item = |id: &str, text: &str, keys: Option<&str>| MenuItem::with_id(id, text, true, keys.and_then(|k| k.parse().ok()));
         let sep = Pre::separator;
         let built = (|| -> muda::Result<Menu> {
-            let app = Submenu::with_items("sonus", true, &[&Pre::about(None, None), &sep(), &Pre::services(None), &sep(), &Pre::hide(None), &Pre::hide_others(None), &Pre::show_all(None), &sep(), &Pre::quit(None)])?;
+            let app = Submenu::with_items("resona", true, &[&Pre::about(None, None), &sep(), &Pre::services(None), &sep(), &Pre::hide(None), &Pre::hide_others(None), &Pre::show_all(None), &sep(), &Pre::quit(None)])?;
             let playback = Submenu::with_items("Playback", true, &[
                 &item("toggle", "Play / Pause (Space)", None),
                 &item("next", "Next Song", Some("CmdOrCtrl+Right")),
@@ -119,7 +119,7 @@ impl App {
 
     /// Hooks into macOS Now Playing: media keys, AirPods and Control Center send us commands.
     pub fn attach_media(&mut self, ctx: &egui::Context) {
-        let config = souvlaki::PlatformConfig { display_name: "sonus", dbus_name: "sonus", hwnd: None };
+        let config = souvlaki::PlatformConfig { display_name: "resona", dbus_name: "resona", hwnd: None };
         let Ok(mut controls) = souvlaki::MediaControls::new(config) else { return };
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
