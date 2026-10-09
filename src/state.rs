@@ -273,6 +273,10 @@ impl State {
     pub fn play_at(&mut self, player: &Player, i: usize) -> bool {
         let Some(t) = self.queue.get(i) else { return false };
         let Ok(id) = SpotifyId::from_base62(track_id(t.id.as_deref().unwrap_or_default())) else { return false };
+        // ponytail: reloading the song that just ended makes librespot 0.8 seek its spent decoder, which can
+        // leave the player dead (repeat one, a one-song repeat all); stopping first makes it load the song fresh.
+        // Costs a refetch when restarting the playing song; drop it once librespot's same-track path is fixed.
+        if self.now.as_ref().is_some_and(|n| n.id == t.id) { player.stop() }
         self.qi = i;
         self.now = Some(t.clone());
         (self.pos_ms, self.since) = (0, None);

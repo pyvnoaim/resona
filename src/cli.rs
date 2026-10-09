@@ -4,7 +4,7 @@
 use std::{
     io::Write,
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -32,6 +32,9 @@ const SUB: C = (0x5f, 0x67, 0x73);
 const FAINT: C = (0x4a, 0x51, 0x5b);
 const GUTTER: C = (0x34, 0x3a, 0x44);
 const RED: C = (0xe0, 0x28, 0x2e);
+
+const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const KEYS: &[(&str, &str)] = &[
     ("↑↓", "move"), ("tab", "pane"), ("enter", "play"), ("/", "search"), (".", "playing"), ("q", "quit"),
@@ -67,6 +70,8 @@ struct Tui {
     sel: Option<String>,
     /// Ctrl+L: send the whole screen next time, not only what changed.
     repaint: bool,
+    /// The clock the splash and spinners run on.
+    born: Instant,
 }
 
 pub fn run() {
@@ -87,7 +92,7 @@ pub fn run() {
     });
 
     let mut ui = Tui {
-        pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, repaint: false,
+        pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, repaint: false, born: Instant::now(),
         style: if setting("cli_style").as_deref() == Some("board") { Style::Board } else { Style::Card },
         volume: setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7),
     };
@@ -104,13 +109,17 @@ pub fn run() {
         }
         let (w, h) = terminal::size().unwrap_or((80, 24));
         if (w, h) != shown_size || std::mem::take(&mut ui.repaint) { (shown, shown_size) = (Vec::new(), (w, h)) } // resize or Ctrl+L: everything
-        let lines = ui.draw(&state.lock().unwrap(), w as usize, h as usize);
+        let lines = ui.draw(&state.lock().unwrap(), w as usize, h as usize, slot.get().is_none());
         let update = paint(&shown, &lines);
         if !update.is_empty() { let _ = out.write_all(update.as_bytes()).and_then(|_| out.flush()); }
         shown = lines;
         // Idle costs nothing: the clock only ticks while something moves.
-        let busy = { let s = state.lock().unwrap(); s.since.is_some() || s.loading || (slot.get().is_none() && s.error.is_none()) };
-        if !event::poll(Duration::from_millis(if busy { 250 } else { 2000 })).unwrap_or(false) { continue }
+        // The splash at ~12 fps; spinners and the clock at 4.
+        let tick = {
+            let s = state.lock().unwrap();
+            if slot.get().is_none() && s.error.is_none() { 80 } else if s.loading || s.since.is_some() { 250 } else { 2000 }
+        };
+        if !event::poll(Duration::from_millis(tick)).unwrap_or(false) { continue }
         let Ok(Event::Key(k)) = event::read() else { continue }; // a resize just redraws
         if k.kind == KeyEventKind::Press && !ui.key(k, slot.get(), &state, rt.handle(), &ctx) { break }
     }
@@ -217,12 +226,13 @@ impl Tui {
     }
 
     /// The whole screen, every cell, as one write.
-    fn draw(&mut self, s: &State, w: usize, h: usize) -> Vec<String> {
+    fn draw(&mut self, s: &State, w: usize, h: usize, starting: bool) -> Vec<String> {
         if w < 60 || h < 18 {
-            let mut lines = vec![center(&[("make the window a little bigger".into(), DIM)], w)];
+            let mut lines = vec![center(&[("make the window a little bigger".into(), DIM)], w, None)];
             lines.resize_with(h, || Seg::new(w, None).done());
             return lines;
         }
+        if starting && s.error.is_none() { return self.splash(s, w, h) }
         let lists = lists_of(s);
         if s.view != self.seen {
             // A new list: start at its top, and point the sidebar at it.
@@ -253,6 +263,26 @@ impl Tui {
         }
     }
 
+    /// Until the engine is up: the name types itself out over a ripple of equaliser bars, with what the
+    /// engine is doing underneath.
+    fn splash(&self, s: &State, w: usize, h: usize) -> Vec<String> {
+        let bg = if self.style == Style::Board { Some(BG) } else { None };
+        let t = self.born.elapsed().as_secs_f32();
+        let row = |parts: &[(String, C)]| center(parts, w, bg);
+        let bars: String = (0..21).map(|i| BARS[(((t * 5.0 - i as f32 * 0.45).sin() + 1.0) * 3.5).round() as usize]).collect();
+        let name: String = "r e s o n a".chars().take((t * 22.0) as usize).collect();
+        let status = if s.status.is_empty() { "starting…" } else { &s.status };
+        let mut lines = vec![row(&[]); h.saturating_sub(7) / 2];
+        lines.extend([row(&[(bars, RED)]), row(&[]), row(&[(format!("{name:<11}"), BRIGHT)]), row(&[]), row(&[(status.into(), DIM)]), row(&[]), row(&[("q quits".into(), GUTTER)])]);
+        lines.resize_with(h, || row(&[]));
+        lines
+    }
+
+    /// A braille spinner on the splash clock.
+    fn spin(&self) -> &'static str {
+        SPIN[(self.born.elapsed().as_millis() / 80) as usize % SPIN.len()]
+    }
+
     /// A centred card of titled boxes on the terminal's own background, filling the window.
     fn card(&mut self, s: &State, lists: &[(Source, String)], longest: usize, w: usize, h: usize) -> Vec<String> {
         let blank = || Seg::new(w, None).done();
@@ -265,20 +295,20 @@ impl Tui {
         lines.push(blank());
 
         // Brand, then whatever the engine has to say.
-        lines.push(line(center(&[("resona".into(), FG), (concat!("  v", env!("CARGO_PKG_VERSION")).into(), GUTTER)], cw)));
+        lines.push(line(center(&[("resona".into(), FG), (concat!("  v", env!("CARGO_PKG_VERSION")).into(), GUTTER)], cw, None)));
         let note = match (&s.error, s.status.is_empty(), &s.notice) {
             (Some(err), _, _) => vec![(short_err(err), RED)],
             (None, false, _) => vec![(s.status.clone(), DIM)],
             (None, true, Some(n)) => vec![(n.clone(), SUB)],
             _ => vec![],
         };
-        lines.push(line(center(&note, cw)));
+        lines.push(line(center(&note, cw, None)));
 
         // Lists and songs, side by side; the focused box is the red one.
         let lw = (longest + 4).clamp(22, (cw / 3).max(22));
         let rw = cw - lw - 1;
         let edge = |pane| if self.pane == pane { RED } else { FAINT };
-        let count = count(s);
+        let count = count(s, self.spin());
         lines.push(line(format!("{} {}",
             top(lw, edge(Pane::Lists), &[("library".into(), FG)], &[(lists.len().to_string(), DIM)]),
             top(rw, edge(Pane::Songs), &[(title(s, lists), FG)], &[(count, DIM)]))));
@@ -298,7 +328,7 @@ impl Tui {
             if at < s.tracks.len() {
                 right = song_row(s, at, rw - 4, false, cursor_bg(at == self.row, Pane::Songs), at == self.row);
             } else if i == 0 && s.tracks.is_empty() {
-                right.put(if s.loading || s.view.is_none() { "…" } else { "nothing here" }, GUTTER);
+                right.put(if s.loading { self.spin() } else if s.view.is_none() { "…" } else { "nothing here" }, GUTTER);
             }
             lines.push(line(format!("{} {}", side(edge(Pane::Lists), left.done()), side(edge(Pane::Songs), right.done()))));
         }
@@ -339,12 +369,12 @@ impl Tui {
         // Keys, or the search being typed.
         match &self.search {
             Some(q) => {
-                lines.push(line(center(&[("/ ".into(), RED), (q.clone(), FG), ("▌".into(), RED)], cw)));
-                lines.push(line(center(&keys(&[("enter", "search"), ("esc", "cancel")]), cw)));
+                lines.push(line(center(&[("/ ".into(), RED), (q.clone(), FG), ("▌".into(), RED)], cw, None)));
+                lines.push(line(center(&keys(&[("enter", "search"), ("esc", "cancel")]), cw, None)));
             }
             None => {
-                lines.push(line(center(&keys(&KEYS[..6]), cw)));
-                lines.push(line(center(&keys(&KEYS[6..]), cw)));
+                lines.push(line(center(&keys(&KEYS[..6]), cw, None)));
+                lines.push(line(center(&keys(&KEYS[6..]), cw, None)));
             }
         }
         lines.resize_with(h, blank);
@@ -365,7 +395,7 @@ impl Tui {
             status.push((s.status.clone(), DIM));
         } else {
             status.push((title(s, lists), DIM));
-            status.push((format!("  ·  {}", count(s)), SUB));
+            status.push((format!("  ·  {}", count(s, self.spin())), SUB));
             if let Some(n) = &s.notice { status.push((format!("  ·  {n}"), SUB)) }
         }
         let mut head = Seg::new(w, Some(BG));
@@ -394,7 +424,7 @@ impl Tui {
             if at < s.tracks.len() {
                 right = song_row(s, at, rw, true, cursor_bg(at == self.row, Pane::Songs), at == self.row);
             } else if i == 0 && s.tracks.is_empty() {
-                right.pad(2).put(if s.loading || s.view.is_none() { "…" } else { "nothing here" }, FAINT);
+                right.pad(2).put(if s.loading { self.spin() } else if s.view.is_none() { "…" } else { "nothing here" }, FAINT);
             }
             lines.push(format!("{}{}{}{}{}", Seg::new(2, Some(BG)).done(), left.done(), Seg::new(3, Some(BG)).done(), right.done(), Seg::new(2, Some(BG)).done()));
         }
@@ -466,10 +496,10 @@ fn song_row(s: &State, at: usize, w: usize, bar: bool, bg: Option<C>, sel: bool)
     row
 }
 
-fn count(s: &State) -> String {
+fn count(s: &State, spin: &str) -> String {
     match (s.loading, s.expected) {
-        (true, Some(n)) => format!("loading {}/{n}", s.tracks.len()),
-        (true, None) => "loading…".into(),
+        (true, Some(n)) => format!("{spin} loading {}/{n}", s.tracks.len()),
+        (true, None) => format!("{spin} loading"),
         _ => match s.sort_label() {
             Some(l) => format!("{} songs · {l}", s.tracks.len()),
             None => format!("{} songs", s.tracks.len()),
@@ -488,8 +518,8 @@ fn keys(pairs: &[(&str, &str)]) -> Vec<(String, C)> {
     out
 }
 
-fn center(parts: &[(String, C)], w: usize) -> String {
-    let mut s = Seg::new(w, None);
+fn center(parts: &[(String, C)], w: usize, bg: Option<C>) -> String {
+    let mut s = Seg::new(w, bg);
     s.pad(w.saturating_sub(width(parts)) / 2);
     for (t, c) in parts { s.put(t, *c); }
     s.done()
