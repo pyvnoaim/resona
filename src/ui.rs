@@ -86,7 +86,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
     let has_lyrics = matches!(lyrics, Some(Lyrics::Lines { .. }));
     let art = (full.height() * if has_lyrics { 0.44 } else { 0.38 }).clamp(140.0, 360.0);
     // Centre the whole stack vertically: cover plus roughly what goes under it.
-    let below = if has_lyrics { 190.0 } else { 300.0 };
+    let below = if has_lyrics { 210.0 } else { 300.0 };
     ui.add_space(((full.height() - art - below) / 2.0).max(52.0));
     ui.vertical_centered(|ui| {
         ui.spacing_mut().item_spacing.y = 10.0;
@@ -111,11 +111,55 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         let pos = s.position();
         match lyrics {
             Some(Lyrics::Lines { synced: true, lines }) => {
-                let cur = lines.iter().rposition(|(at, _)| *at <= pos);
-                let now = cur.map_or("", |c| lines[c].1.as_str());
-                let next = lines.get(cur.map_or(0, |c| c + 1)).map_or("", |l| l.1.as_str());
-                ui.add(egui::Label::new(RichText::new(if now.is_empty() { "♪" } else { now }).font(big).color(now_ink)).wrap());
-                ui.add(egui::Label::new(RichText::new(next).font(small_line).color(p.dim)).wrap());
+                // The lines roll up: the sung line big in the middle, the one just sung above and the next below,
+                // smaller and fainter. A turning line crossfades between the two fixed sizes (in-between sizes
+                // would fill the glyph atlas). Line -1 is the ♪ before the first.
+                let cur = lines.iter().rposition(|(at, _)| *at <= pos).map_or(-1, |c| c as isize);
+                let k = ui.ctx().animate_value_with_time(egui::Id::new("lyric-roll"), cur as f32, 0.5);
+                let d = (cur as f32 - k).clamp(0.0, 1.0).powi(3); // 1 just moved on .. 0 settled, eased out
+                let fonts = [big.clone(), small_line.clone()];
+                let wrap = (ui.available_width() - 40.0).max(100.0);
+                let height = (full.bottom() - ui.cursor().top() - 16.0).clamp(120.0, 200.0);
+                let rect = ui.allocate_space(vec2(wrap, height)).1;
+                let painter = ui.painter().with_clip_rect(rect);
+                let text = |j: isize| match usize::try_from(j).ok().and_then(|j| lines.get(j)) {
+                    Some((_, w)) if !w.is_empty() => w.as_str(),
+                    _ if (-1..lines.len() as isize).contains(&j) => "♪",
+                    _ => "",
+                };
+                let lay = |j: isize, f: usize| {
+                    let mut job = egui::text::LayoutJob::simple(text(j).to_owned(), fonts[f].clone(), p.text, wrap);
+                    job.halign = egui::Align::Center;
+                    painter.layout_job(job)
+                };
+                // Line j's height while line c is sung, and where its middle sits: stacked out from c in the middle.
+                let h = |j: isize, c: isize| lay(j, (j - c).unsigned_abs().min(1)).size().y;
+                let gap = 8.0;
+                let mid = |j: isize, c: isize| {
+                    let (mut y, mut i, step) = (rect.center().y, c, if j < c { -1 } else { 1 });
+                    while i != j {
+                        y += step as f32 * (h(i, c) / 2.0 + gap + h(i + step, c) / 2.0);
+                        i += step;
+                    }
+                    y
+                };
+                for j in cur - 2..=cur + 2 {
+                    let slot = (j - cur) as f32 + d; // 0 is the sung line, 1 the next, -1 the one just sung
+                    let dist = slot.abs();
+                    let y = mid(j, cur) * (1.0 - d) + mid(j, cur - 1) * d;
+                    // Lines still to come show a little brighter than the ones already sung.
+                    let fade = if slot < 0.0 { [1.0, 0.5, 0.0] } else { [1.0, 0.75, 0.0] };
+                    let i = (dist as usize).min(1);
+                    let alpha = fade[i] + (fade[i + 1] - fade[i]) * (dist - i as f32).min(1.0);
+                    let ink = p.dim.lerp_to_gamma(now_ink, (1.0 - dist).max(0.0));
+                    let t = if i == 1 { 0.0 } else { dist.fract() };
+                    for (f, share) in [(i, 1.0 - t), (1, t)] {
+                        if alpha * share < 0.01 { continue }
+                        let g = lay(j, f);
+                        let at = pos2(rect.center().x, y - g.size().y / 2.0);
+                        painter.galley_with_override_text_color(at, g, ink.gamma_multiply(alpha * share));
+                    }
+                }
             }
             Some(Lyrics::Lines { lines, .. }) => {
                 // Not synced: the whole text, quietly, to scroll through.
