@@ -22,7 +22,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `web_refresh_token` | Web API sign-in (mode 0600) |
 | `settings` | `key=value`: skin, theme, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style` |
 | `unplayable` | track ids Spotify refused to play, one per line |
-| `liked` | liked track ids, one per line: the hearts, refreshed whenever Liked Songs is opened |
+| `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 
 Delete the first two to sign in again (and `liked` too when switching accounts: it holds that account's hearts).
 
@@ -53,9 +53,9 @@ font's default instance.
   scope to `SCOPES` forces one new browser sign-in.
 - **The Web API is restricted for developer apps**, so several things go through the librespot session instead:
   playlists you don't own (`Playlist::web_readable` decides), artist pages and album pages. Liked hearts come from
-  `~/.resona/liked`, refreshed whenever Liked Songs loads (it's read in full then anyway) and on every like; only a
-  first run reads it all up front (`load_liked`), because the old "are these liked?" lookup
-  (`/me/tracks/contains`) was 403. Its replacement, `GET /me/library/contains`, is untried.
+  `~/.resona/liked` at once, then fresh on every launch from `load_liked`: Liked Songs resolved as a playback
+  context (`spotify:user:<id>:collection`), every id in one session request. The old "are these liked?" lookup
+  (`/me/tracks/contains`) was 403; its replacement, `GET /me/library/contains`, is untried.
 - **Sort:** songs keep when they were added (`Track.added`, never shown) and their list position (`pos`); every
   loader hands songs to `State::add_tracks`, which numbers and sorts them. Lists without dates ignore the sort.
 - **Refused songs:** librespot reports `Unavailable` for failed *preloads* too; only a failure of the playing track
@@ -76,7 +76,7 @@ font's default instance.
   Developer apps get day-long bans for bursts, so startup stays small: playlists and Liked Songs only; what's in
   each playlist (`load_members`) waits for the first "Add to playlist" menu. A failed library load is shown, not
   fatal: playback runs on librespot and keeps working through a ban, and the sidebar falls back to the session's
-  rootlist (`session_playlists`: no covers, and every list then opens through the session).
+  rootlist (`session_playlists`: only uploaded covers, mosaics are rebuilt from each list's first albums by `session_mosaic`; every list then opens through the session).
 - **Search** asks for pages of 10 and stops at 5 pages; newer developer apps get a lower page-size cap.
 - **Repaints:** nothing redraws when idle; 4 fps while playing, 20 fps while the equaliser bars or meter are on
   screen, ~16 fps while a list is loading.

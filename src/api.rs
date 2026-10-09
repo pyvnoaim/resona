@@ -284,6 +284,52 @@ fn rootlist_playlists(list: &librespot::protocol::playlist4_external::SelectedLi
     }).collect())
 }
 
+/// Every liked song id through the session: Liked Songs resolved as a playback context, works through a Web API ban.
+pub async fn session_liked(session: &Session) -> Result<std::collections::HashSet<String>, String> {
+    let uri = format!("spotify:user:{}:collection", session.username());
+    let ctx = patient(|| session.spclient().get_context(&uri)).await.map_err(|e| format!("Liked Songs: {e}"))?;
+    // ponytail: one page held all 4400 songs; follow `next_page_url` if Spotify ever splits it.
+    Ok(ctx.pages.iter().flat_map(|p| &p.tracks).filter_map(|t| t.uri().strip_prefix("spotify:track:")).map(String::from).collect())
+}
+
+/// The cover Spotify draws for a playlist without its own picture: its first four albums as a mosaic, or the
+/// first album's cover when it has fewer. Read through the session, so it works through a Web API ban.
+pub async fn session_mosaic(session: &Session, id: &str) -> Option<String> {
+    use librespot::protocol::playlist4_external::SelectedListContent;
+    use protobuf::Message;
+    let path = format!("/playlist/v2/playlist/{id}?from=0&length=20");
+    let bytes = patient(|| session.spclient().request(&reqwest::Method::GET, &path, None, None)).await.ok()?;
+    let list = SelectedListContent::parse_from_bytes(&bytes).ok()?;
+    let mut covers: Vec<String> = Vec::new();
+    for it in &list.contents.get_or_default().items {
+        let Ok(u @ SpotifyUri::Track { .. }) = SpotifyUri::from_uri(it.uri()) else { continue };
+        // One at a time: usually four songs do it, and the player shares this limiter.
+        let Ok(t) = patient(|| metadata::Track::get(session, &u)).await else { continue };
+        if let Some(c) = t.album.covers.first().and_then(|c| c.id.to_base16().ok()) && !covers.contains(&c) {
+            covers.push(c);
+            if covers.len() == 4 { break }
+        }
+    }
+    covers.sort(); // Spotify's own mosaics have their tiles in this order
+    mosaic_url(&covers)
+}
+
+fn mosaic_url(covers: &[String]) -> Option<String> {
+    match covers {
+        [] => None,
+        [a, b, c, d, ..] => Some(format!("https://mosaic.scdn.co/300/{a}{b}{c}{d}")),
+        [a, ..] => Some(format!("https://i.scdn.co/image/{a}")),
+    }
+}
+
+#[test]
+fn mosaic_needs_four_albums_else_the_first_cover() {
+    let c = |n: usize| (0..n).map(|i| format!("c{i}")).collect::<Vec<_>>();
+    assert_eq!(mosaic_url(&c(0)), None);
+    assert_eq!(mosaic_url(&c(3)).unwrap(), "https://i.scdn.co/image/c0");
+    assert_eq!(mosaic_url(&c(4)).unwrap(), "https://mosaic.scdn.co/300/c0c1c2c3");
+}
+
 #[test]
 fn rootlist_keeps_playlists_skips_folders_and_never_reads_as_web_readable() {
     use librespot::protocol::playlist4_external::{Item, MetaItem, SelectedListContent};
@@ -499,3 +545,5 @@ fn patient_waits_out_the_limiter_and_passes_other_errors_straight_through() {
     let other = rt.block_on(patient(|| { calls.set(calls.get() + 1); async { Err::<(), _>("not found") } }));
     assert_eq!((other, calls.get()), (Err("not found"), 1)); // no retry for real errors
 }
+
+

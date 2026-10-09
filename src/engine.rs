@@ -72,7 +72,22 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
             Err(e) => {
                 // The same list through the session, which bans don't touch; the error still says why covers are missing.
                 let e = match api::session_playlists(&engine.session).await {
-                    Ok(all) => { state.lock().unwrap().playlists = all; e }
+                    Ok(all) => {
+                        // The rootlist only has covers you uploaded; Spotify's mosaics are drawn from the songs.
+                        let bare: Vec<String> = all.iter().filter(|p| p.images.is_none()).map(|p| p.id.clone()).collect();
+                        state.lock().unwrap().playlists = all;
+                        let (session, state, ctx) = (engine.session.clone(), state.clone(), ctx.clone());
+                        tokio::spawn(async move {
+                            for id in bare {
+                                let Some(url) = api::session_mosaic(&session, &id).await else { continue };
+                                if let Some(p) = state.lock().unwrap().playlists.iter_mut().find(|p| p.id == id) {
+                                    p.images = Some(vec![api::Image { url }]);
+                                }
+                                ctx.request_repaint();
+                            }
+                        });
+                        e
+                    }
                     Err(also) => format!("{e}; {also}"),
                 };
                 state.lock().unwrap().error = Some(e);
@@ -83,11 +98,9 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
         ctx.request_repaint();
         url = page.next;
     }
-    // Hearts come from ~/.resona/liked, refreshed whenever Liked Songs is opened; only a first run reads it all.
-    match load_liked_ids() {
-        Some(ids) => { let mut s = state.lock().unwrap(); (s.liked, s.liked_complete) = (ids, true) }
-        None => { tokio::spawn(load_liked(state.clone(), engine.web.clone(), engine.http.clone(), ctx.clone())); }
-    }
+    // Hearts: ~/.resona/liked at once, then the whole set fresh through the session (one request).
+    if let Some(ids) = load_liked_ids() { let mut s = state.lock().unwrap(); (s.liked, s.liked_complete) = (ids, true) }
+    tokio::spawn(load_liked(state.clone(), engine.session.clone(), ctx.clone()));
     let _ = slot.set(engine);
     set("");
 
@@ -127,21 +140,17 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
     Ok(())
 }
 
-/// Every liked track id, page by page, so lists can show hearts. Developer apps get 403 from Spotify's
-/// "which of these are liked?" lookup, so we read the whole Liked Songs list instead: on a first run only,
-/// then it's kept in ~/.resona/liked.
-pub async fn load_liked(state: Shared, web: Arc<api::WebAuth>, http: reqwest::Client, ctx: egui::Context) {
-    let mut url = Some("me/tracks?limit=50".to_string());
-    while let Some(u) = url {
-        // ponytail: on failure the hearts just stay empty; liking still works.
-        let Ok(page) = api::get::<api::Page<api::Entry>>(&web, &http, &u).await else { return };
-        state.lock().unwrap().liked.extend(page.items.into_iter().filter_map(api::Entry::playable).filter_map(|t| t.id));
-        ctx.request_repaint();
-        url = page.next;
-    }
+/// Every liked track id, so lists can show hearts: Liked Songs as a playback context, all of it in one session
+/// request (the Web API needs ~90 requests for 4000 songs, and its "are these liked?" lookup is 403).
+pub async fn load_liked(state: Shared, session: Session, ctx: egui::Context) {
+    let edits = state.lock().unwrap().liked_edits;
+    // ponytail: on failure the hearts stay as saved; liking still works.
+    let Ok(ids) = api::session_liked(&session).await else { return };
     let mut s = state.lock().unwrap();
-    s.liked_complete = true;
+    if s.liked_edits != edits { return } // a like landed meanwhile: this set may predate it
+    (s.liked, s.liked_complete) = (ids, true);
     save_liked_ids(&s.liked);
+    ctx.request_repaint();
 }
 
 /// What's already in each of your own playlists, so the menu can tick them. Ids only, to keep it light.
