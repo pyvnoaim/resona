@@ -223,9 +223,9 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         _ => false,
     };
     if let (true, Source::Playlist(id)) = (foreign, src.clone()) {
-        let session = e.session.clone();
+        let (session, sort) = (e.session.clone(), state.lock().unwrap().sort);
         rt.spawn(async move {
-            let done = api::session_playlist(&session, &id, |tracks, total| {
+            let done = api::session_playlist(&session, &id, sort, |tracks, total| {
                 let mut s = state.lock().unwrap();
                 if s.view.as_ref() != Some(&src) { return false } // user moved on
                 s.expected = Some(total);
@@ -266,7 +266,10 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             let mut s = state.lock().unwrap();
             if s.view.as_ref() != Some(&src) { return } // user moved on
             match got {
-                Ok((tracks, page)) => { s.artist = page; s.add_tracks(tracks) }
+                Ok((tracks, page)) => {
+                    s.artist = page;
+                    s.add_tracks(tracks.into_iter().enumerate().map(|(pos, t)| api::Track { pos, ..t }).collect());
+                }
                 Err(e) => s.error = Some(e),
             }
             s.loading = false;
@@ -275,30 +278,49 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         return;
     }
     rt.spawn(async move {
-        let edits = state.lock().unwrap().liked_edits;
+        let (edits, sort) = { let s = state.lock().unwrap(); (s.liked_edits, s.sort) };
+        // Pages come in list order, except when the sort puts the list's end on top: Liked Songs is newest
+        // first already, playlists oldest first. Then a one-song page asks for the length, and pages are read
+        // from the end, so the top of the list fills in first.
+        let (page_url, size) = match &src {
+            Source::Liked => ("me/tracks?limit=".to_string(), 50),
+            Source::Playlist(id) => (format!("playlists/{id}/items?limit="), 100),
+            _ => (String::new(), 0),
+        };
+        let backwards = matches!((&src, sort), (Source::Liked, Sort::Oldest) | (Source::Playlist(_), Sort::Newest));
+        let mut back: Vec<usize> = Vec::new(); // page offsets still to read backwards; the last one first
         let mut url = Some(match &src {
-            Source::Liked => "me/tracks?limit=50".to_string(),
-            Source::Playlist(id) => format!("playlists/{id}/items?limit=100"),
             Source::Search(q) => api::search_url(q),
+            Source::Liked | Source::Playlist(_) => format!("{page_url}{}", if backwards { 1 } else { size }),
             Source::Artist { .. } | Source::Album { .. } | Source::Queue => return,
         });
         let mut pages = 0;
         while let Some(u) = url {
             let page = match &src {
                 Source::Search(_) => api::get::<api::Search>(&web, &http, &u).await
-                    .map(|r| (r.tracks.items, r.tracks.next, r.tracks.total.map(|t| t.min(50)))),
+                    .map(|r| (r.tracks.items, r.tracks.next, r.tracks.total.map(|t| t.min(50)), r.tracks.offset)),
                 _ => api::get::<api::Page<api::Entry>>(&web, &http, &u).await
-                    .map(|p| (p.items.into_iter().filter_map(api::Entry::playable).collect(), p.next, p.total)),
+                    .map(|p| (p.items.into_iter().filter_map(api::Entry::playable).collect(), p.next, p.total, p.offset)),
             };
             let mut s = state.lock().unwrap();
             if s.view.as_ref() != Some(&src) { return } // user moved on
             pages += 1;
             match page {
-                Ok((tracks, next, total)) => {
+                Ok((tracks, next, total, offset)) => {
                     s.expected = s.expected.or(total);
-                    s.add_tracks(tracks);
-                    // Search pages are small; 5 of them is plenty, and keeps us off the rate limit.
-                    url = next.filter(|_| !matches!(src, Source::Search(_)) || pages < 5);
+                    if backwards && pages == 1 {
+                        back = (0..total.unwrap_or(0)).step_by(size).collect(); // only asked for the length
+                    } else {
+                        // ponytail: a song Spotify can't play here drops out of the page, so later positions
+                        // shift by one; only ties between same-date songs could notice.
+                        s.add_tracks(tracks.into_iter().enumerate().map(|(i, t)| api::Track { pos: offset + i, ..t }).collect());
+                    }
+                    url = if backwards {
+                        back.pop().map(|o| format!("{page_url}{size}&offset={o}"))
+                    } else {
+                        // Search pages are small; 5 of them is plenty, and keeps us off the rate limit.
+                        next.filter(|_| !matches!(src, Source::Search(_)) || pages < 5)
+                    };
                 }
                 Err(e) => { s.error = Some(e); url = None; }
             }

@@ -79,6 +79,14 @@ impl Sort {
     pub fn from_key(k: &str) -> Self {
         match k { "list" => Sort::List, "oldest" => Sort::Oldest, _ => Sort::Newest }
     }
+    /// Puts (added, pos) pairs in this order, newest first by default; ties keep list order.
+    pub fn order<T>(self, v: &mut [T], key: impl Fn(&T) -> (i64, usize)) {
+        match self {
+            Sort::List => v.sort_by_key(|x| key(x).1),
+            Sort::Newest => v.sort_by_key(|x| (std::cmp::Reverse(key(x).0), key(x).1)),
+            Sort::Oldest => v.sort_by_key(|x| key(x)),
+        }
+    }
     /// The order this list was last left in; newest added first for a list never sorted.
     pub fn saved(src: &Source) -> Self {
         src.key().and_then(|k| crate::settings::setting(&format!("sort:{k}"))).map(|v| Self::from_key(&v)).unwrap_or_default()
@@ -222,10 +230,10 @@ impl State {
         self.queued = kept.len();
     }
 
-    /// Songs arriving for the open list (a page, or all of them): numbered in list order, then sorted.
+    /// Songs arriving for the open list (a page, or all of them), each with its `pos` set by the loader:
+    /// pages can arrive in any order (newest first loads the end of a list first).
     pub fn add_tracks(&mut self, new: Vec<api::Track>) {
-        let at = self.tracks.len();
-        self.tracks.extend(new.into_iter().enumerate().map(|(i, t)| api::Track { pos: at + i, ..t }));
+        self.tracks.extend(new);
         self.sort_tracks();
     }
 
@@ -247,12 +255,8 @@ impl State {
     }
 
     fn sort_tracks(&mut self) {
-        // Stable, with list order breaking ties, so songs without dates keep their places.
-        match self.sort {
-            Sort::List => self.tracks.sort_by_key(|t| t.pos),
-            Sort::Newest => self.tracks.sort_by_key(|t| (std::cmp::Reverse(t.added), t.pos)),
-            Sort::Oldest => self.tracks.sort_by_key(|t| (t.added, t.pos)),
-        }
+        // List order breaks ties, so songs without dates keep their places.
+        self.sort.order(&mut self.tracks, |t| (t.added, t.pos));
     }
 
     pub fn toggle_shuffle(&mut self) {
@@ -333,15 +337,15 @@ pub struct ArtistPage {
 
 #[test]
 fn sorting_by_added_keeps_undated_songs_in_list_order_and_comes_back() {
-    let t = |name: &str, added| api::Track { name: name.into(), added, ..Default::default() };
+    let t = |name: &str, added, pos| api::Track { name: name.into(), added, pos, ..Default::default() };
     let mut s = State::default();
-    s.add_tracks(vec![t("b", 20), t("a", 10), t("c", 30)]);
+    s.add_tracks(vec![t("b", 20, 0), t("a", 10, 1), t("c", 30, 2)]);
     let names = |s: &State| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join("");
     s.sort = Sort::Oldest; s.sort_tracks();
     assert_eq!(names(&s), "abc");
     s.sort = Sort::Newest; s.sort_tracks();
     assert_eq!(names(&s), "cba");
-    s.add_tracks(vec![t("x", 0), t("y", 0)]); // a later page, no dates: after the dated ones, in order
+    s.add_tracks(vec![t("x", 0, 3), t("y", 0, 4)]); // a later page, no dates: after the dated ones, in order
     assert_eq!(names(&s), "cbaxy");
     s.sort = Sort::List; s.sort_tracks();
     assert_eq!(names(&s), "bacxy"); // the list's own order again

@@ -81,6 +81,9 @@ pub struct Page<T> {
     pub next: Option<String>,
     #[serde(default)]
     pub total: Option<usize>,
+    /// Where this page starts in the whole list.
+    #[serde(default)]
+    pub offset: usize,
 }
 
 #[derive(Deserialize, Clone)]
@@ -304,8 +307,10 @@ fn rootlist_keeps_playlists_skips_folders_and_never_reads_as_web_readable() {
 }
 
 /// Tracks of a playlist someone else owns, read through the session like the official client does.
-/// Hands them over `CHUNK` at a time with the playlist's track count; stops early when `each` returns false (the user moved on).
-pub async fn session_playlist(session: &Session, id: &str, mut each: impl FnMut(Vec<Track>, usize) -> bool) -> Result<(), String> {
+/// The song list (ids and dates) comes first, so songs are fetched in `sort` order: the top of the list fills
+/// in first. Hands them over `CHUNK` at a time with the playlist's track count; stops early when `each` returns
+/// false (the user moved on).
+pub async fn session_playlist(session: &Session, id: &str, sort: crate::state::Sort, mut each: impl FnMut(Vec<Track>, usize) -> bool) -> Result<(), String> {
     use librespot::protocol::playlist4_external::SelectedListContent;
     use protobuf::Message;
     const CHUNK: usize = 25;
@@ -314,35 +319,37 @@ pub async fn session_playlist(session: &Session, id: &str, mut each: impl FnMut(
     // at ~8/s so the player keeps room: when it's starved, a playable song gets reported as refused.
     const BURST: usize = 200;
     // Page through the list ourselves: librespot's `Playlist::get` asks once, for the first part only.
-    let (mut from, mut fetched) = (0, 0);
+    let (mut from, mut songs) = (0, Vec::new());
+    let mut total;
     loop {
         let path = format!("/playlist/v2/playlist/{id}?from={from}&length={PAGE}");
         let bytes = patient(|| session.spclient().request(&reqwest::Method::GET, &path, None, None)).await.map_err(|e| format!("Playlist: {e}"))?;
         let list = SelectedListContent::parse_from_bytes(&bytes).map_err(|e| format!("Playlist: {e}"))?;
-        let total = list.length().max(0) as usize;
+        total = list.length().max(0) as usize;
+        if !each(Vec::new(), total) { return Ok(()) }
         let items = &list.contents.get_or_default().items;
-        let page: Vec<(SpotifyUri, i64)> = items.iter()
-            .filter_map(|it| Some((SpotifyUri::from_uri(it.uri()).ok()?, it.attributes.timestamp())))
-            .filter(|(u, _)| matches!(u, SpotifyUri::Track { .. }))
-            .collect();
-        for chunk in page.chunks(CHUNK) {
-            if !each(Vec::new(), total) { return Ok(()) } // moved on: stop before spending more of the budget
-            if fetched >= BURST { tokio::time::sleep(Duration::from_secs(3)).await }
-            fetched += chunk.len();
-            let mut set = tokio::task::JoinSet::new();
-            for (i, (u, added)) in chunk.iter().cloned().enumerate() {
-                let session = session.clone();
-                set.spawn(async move { (i, patient(|| metadata::Track::get(&session, &u)).await.map(|t| Track { added, ..Track::from(t) })) });
-            }
-            let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
-            while let Some(Ok((i, t))) = set.join_next().await {
-                got[i] = t.ok(); // unavailable tracks just drop out
-            }
-            if !each(got.into_iter().flatten().collect(), total) { return Ok(()) }
-        }
+        songs.extend(items.iter().enumerate()
+            .filter_map(|(i, it)| Some((SpotifyUri::from_uri(it.uri()).ok()?, it.attributes.timestamp(), from + i)))
+            .filter(|(u, _, _)| matches!(u, SpotifyUri::Track { .. })));
         from += items.len();
-        if items.is_empty() || (total > 0 && from >= total) { return Ok(()) }
+        if items.is_empty() || (total > 0 && from >= total) { break }
     }
+    sort.order(&mut songs, |(_, added, pos)| (*added, *pos));
+    for (n, chunk) in songs.chunks(CHUNK).enumerate() {
+        if !each(Vec::new(), total) { return Ok(()) } // moved on: stop before spending more of the budget
+        if n * CHUNK >= BURST { tokio::time::sleep(Duration::from_secs(3)).await }
+        let mut set = tokio::task::JoinSet::new();
+        for (i, (u, added, pos)) in chunk.iter().cloned().enumerate() {
+            let session = session.clone();
+            set.spawn(async move { (i, patient(|| metadata::Track::get(&session, &u)).await.map(|t| Track { added, pos, ..Track::from(t) })) });
+        }
+        let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
+        while let Some(Ok((i, t))) = set.join_next().await {
+            got[i] = t.ok(); // unavailable tracks just drop out
+        }
+        if !each(got.into_iter().flatten().collect(), total) { return Ok(()) }
+    }
+    Ok(())
 }
 
 /// Runs a session request, waiting out librespot's own rate limiter ("Resource has been exhausted") instead of
