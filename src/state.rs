@@ -59,11 +59,11 @@ pub enum Repeat {
 }
 
 /// How the open list is ordered: as Spotify keeps it, or by when songs were added. Lists without dates
-/// (search, albums, artists) look the same in every order.
+/// (search, albums, artists) look the same in every order. Each list keeps its own (`sort:<list key>` in settings).
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum Sort {
-    #[default]
     List,
+    #[default]
     Newest,
     Oldest,
 }
@@ -77,7 +77,11 @@ impl Sort {
         match self { Sort::List => "list", Sort::Newest => "newest", Sort::Oldest => "oldest" }
     }
     pub fn from_key(k: &str) -> Self {
-        match k { "newest" => Sort::Newest, "oldest" => Sort::Oldest, _ => Sort::List }
+        match k { "list" => Sort::List, "oldest" => Sort::Oldest, _ => Sort::Newest }
+    }
+    /// The order this list was last left in; newest added first for a list never sorted.
+    pub fn saved(src: &Source) -> Self {
+        src.key().and_then(|k| crate::settings::setting(&format!("sort:{k}"))).map(|v| Self::from_key(&v)).unwrap_or_default()
     }
 }
 
@@ -232,10 +236,13 @@ impl State {
         self.sort.label().filter(|_| self.tracks.iter().any(|t| t.added > 0))
     }
 
-    /// List order → newest added → oldest added, remembered for next time.
+    /// List order → newest added → oldest added, remembered for this list.
     pub fn cycle_sort(&mut self) {
         self.sort = match self.sort { Sort::List => Sort::Newest, Sort::Newest => Sort::Oldest, Sort::Oldest => Sort::List };
-        crate::settings::set_setting("sort", self.sort.key());
+        // Searches have no dates to sort by, and a query can hold the `=` the settings file splits on.
+        if let Some(k) = self.view.as_ref().filter(|v| !matches!(v, Source::Search(_))).and_then(Source::key) {
+            crate::settings::set_setting(&format!("sort:{k}"), self.sort.key());
+        }
         self.sort_tracks();
     }
 

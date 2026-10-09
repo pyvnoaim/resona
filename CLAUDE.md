@@ -20,7 +20,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 |---|---|
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, volume, last open list, `sort`, `cli_style` |
+| `settings` | `key=value`: skin, theme, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style` |
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `liked` | liked track ids, one per line: the hearts, refreshed whenever Liked Songs is opened |
 

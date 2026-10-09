@@ -86,7 +86,6 @@ impl App {
         app.attach_menu(&cc.egui_ctx);
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
-        app.state.lock().unwrap().sort = Sort::from_key(&setting("sort").unwrap_or_default());
         app.attach_media(&cc.egui_ctx);
         let (state, slot, ctx) = (app.state.clone(), app.engine.clone(), cc.egui_ctx.clone());
         app.rt.spawn(async move {
@@ -210,6 +209,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         if s.view.as_ref() == Some(&src) { return }
         (s.view, s.loading, s.error, s.expected, s.notice, s.artist) = (Some(src.clone()), true, None, None, None, None);
         s.tracks.clear();
+        s.sort = Sort::saved(&src); // before any song arrives: pages are sorted as they land
         if src == Source::Queue {
             s.loading = false; // drawn straight from the play queue
             return;
