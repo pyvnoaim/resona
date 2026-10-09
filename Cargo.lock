@@ -4042,6 +4042,7 @@ dependencies = [
  "crossterm",
  "eframe",
  "egui_extras",
+ "env_logger",
  "image",
  "librespot",
  "librespot-oauth",

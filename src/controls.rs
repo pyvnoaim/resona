@@ -96,7 +96,7 @@ impl App {
                 "like" => if let Some(id) = now_id { self.toggle_like(id) },
                 "copy" => if let Some(id) = now_id { ctx.copy_text(format!("https://open.spotify.com/track/{id}")) },
                 "queue" => if let (Some(t), Some(e)) = (self.hovered.clone(), self.engine.get()) {
-                    self.state.lock().unwrap().enqueue(&e.player, t, false);
+                    self.state.lock().unwrap().enqueue(&e.player(), t, false);
                 },
                 "help" => self.help = !self.help,
                 other => {
@@ -219,7 +219,7 @@ impl App {
         if hit(Key::Q) && let (Some(t), Some(e)) = (self.hovered.clone(), self.engine.get()) {
             let mut s = self.state.lock().unwrap();
             s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
-            s.enqueue(&e.player, t, false);
+            s.enqueue(&e.player(), t, false);
         }
     }
 }

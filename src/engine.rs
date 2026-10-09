@@ -1,7 +1,7 @@
 //! librespot: sign-in, the session and player, and the background loaders that fill the library.
 
 use std::{
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::Instant,
 };
 
@@ -12,7 +12,7 @@ use librespot::{
         audio_backend,
         config::{AudioFormat, PlayerConfig},
         mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
-        player::{Player, PlayerEvent},
+        player::{Player, PlayerEvent, PlayerEventChannel},
     },
 };
 use librespot_oauth::OAuthClientBuilder;
@@ -26,14 +26,41 @@ pub const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 pub const REDIRECT: &str = "http://127.0.0.1:8898/login";
 
 pub struct Engine {
-    pub player: Arc<Player>,
-    pub session: Session,
+    // Swapped by `reconnect`, so always read through `player()` / `session()`.
+    player: RwLock<Arc<Player>>,
+    session: RwLock<Session>,
     pub web: Arc<api::WebAuth>,
     pub mixer: Arc<SoftMixer>,
     pub http: reqwest::Client,
 }
 
 pub type Shared = Arc<Mutex<State>>;
+
+impl Engine {
+    pub fn player(&self) -> Arc<Player> { self.player.read().unwrap().clone() }
+    pub fn session(&self) -> Session { self.session.read().unwrap().clone() }
+
+    /// librespot never reconnects a session that lost its connection (a network drop, a missed keepalive, sleep):
+    /// every load after that fails. A fresh session and player take over; the caller listens to the new events.
+    async fn reconnect(&self) -> Result<PlayerEventChannel, String> {
+        let cache = Cache::new(Some(&std::env::home_dir().unwrap().join(".resona")), None, None, None).map_err(|e| e.to_string())?;
+        let creds = cache.credentials().ok_or("No saved sign-in")?;
+        let (session, player) = start(cache, creds, &self.mixer).await?;
+        let events = player.get_player_event_channel();
+        *self.session.write().unwrap() = session;
+        *self.player.write().unwrap() = player; // the old one stops when its last clone drops
+        Ok(events)
+    }
+}
+
+/// A signed-in session and a player on it.
+async fn start(cache: Cache, creds: Credentials, mixer: &SoftMixer) -> Result<(Session, Arc<Player>), String> {
+    let session = Session::new(SessionConfig::default(), Some(cache));
+    session.connect(creds, true).await.map_err(|e| format!("Connect failed: {e}"))?;
+    let backend = audio_backend::find(None).unwrap();
+    let player = Player::new(PlayerConfig::default(), session.clone(), mixer.get_soft_volume(), move || backend(None, AudioFormat::default()));
+    Ok((session, player))
+}
 
 pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Context) -> Result<(), String> {
     let set = |s: &str| { state.lock().unwrap().status = s.into(); ctx.request_repaint(); };
@@ -51,16 +78,12 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
         }
     };
     set("Connecting…");
-    let session = Session::new(SessionConfig::default(), Some(cache));
-    session.connect(creds, true).await.map_err(|e| format!("Connect failed: {e}"))?;
-
     let mixer = Arc::new(SoftMixer::open(MixerConfig::default()).map_err(|e| e.to_string())?);
     mixer.set_volume((0.7 * u16::MAX as f32) as u16);
-    let backend = audio_backend::find(None).unwrap();
-    let player = Player::new(PlayerConfig::default(), session.clone(), mixer.get_soft_volume(), move || backend(None, AudioFormat::default()));
+    let (session, player) = start(cache, creds, &mixer).await?;
     let mut events = player.get_player_event_channel();
     let web = Arc::new(api::WebAuth::new(&dir, REDIRECT)?);
-    let engine = Engine { player: player.clone(), session, web, mixer, http: reqwest::Client::new() };
+    let engine = Engine { player: RwLock::new(player), session: RwLock::new(session), web, mixer, http: reqwest::Client::new() };
 
     // Sidebar: every playlist, page by page.
     set("Loading your library…");
@@ -71,12 +94,12 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
             Ok(page) => page,
             Err(e) => {
                 // The same list through the session, which bans don't touch; the error still says why covers are missing.
-                let e = match api::session_playlists(&engine.session).await {
+                let e = match api::session_playlists(&engine.session()).await {
                     Ok(all) => {
                         // The rootlist only has covers you uploaded; Spotify's mosaics are drawn from the songs.
                         let bare: Vec<String> = all.iter().filter(|p| p.images.is_none()).map(|p| p.id.clone()).collect();
                         state.lock().unwrap().playlists = all;
-                        let (session, state, ctx) = (engine.session.clone(), state.clone(), ctx.clone());
+                        let (session, state, ctx) = (engine.session(), state.clone(), ctx.clone());
                         tokio::spawn(async move {
                             for id in bare {
                                 let Some(url) = api::session_mosaic(&session, &id).await else { continue };
@@ -100,9 +123,9 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
     }
     // Hearts: ~/.resona/liked at once, then the whole set fresh through the session (one request).
     if let Some(ids) = load_liked_ids() { let mut s = state.lock().unwrap(); (s.liked, s.liked_complete) = (ids, true) }
-    tokio::spawn(load_liked(state.clone(), engine.session.clone(), ctx.clone()));
-    let session = engine.session.clone();
+    tokio::spawn(load_liked(state.clone(), engine.session(), ctx.clone()));
     let _ = slot.set(engine);
+    let e = slot.get().unwrap();
     set("");
 
     let mut retried: Option<String> = None; // the song that already got its second try
@@ -113,10 +136,22 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
             PlayerEvent::Unavailable { track_id, .. } => {
                 let id = track_id.to_id().ok();
                 let ours = id.is_some() && { let s = state.lock().unwrap(); !s.loading && s.now.as_ref().and_then(|t| t.id.clone()) == id };
-                match id { Some(id) if ours => api::refused(&session, &id).await, _ => false }
+                // A dead session fails every song: reconnect and play this one again, instead of skipping them all.
+                if ours && e.session().is_invalid() {
+                    let back = e.reconnect().await;
+                    let mut s = state.lock().unwrap();
+                    match back {
+                        Ok(new) => { events = new; let from = s.qi; s.play_at(&e.player(), from); }
+                        Err(err) => { (s.pos_ms, s.since) = (0, None); s.error = Some(format!("Lost the connection to Spotify: {err}")) }
+                    }
+                    ctx.request_repaint();
+                    continue;
+                }
+                match id { Some(id) if ours => api::refused(&e.session(), &id).await, _ => false }
             }
             _ => false,
         };
+        let player = e.player();
         let mut s = state.lock().unwrap();
         match ev {
             PlayerEvent::Playing { position_ms, .. } => (s.pos_ms, s.since) = (position_ms, Some(Instant::now())),
@@ -205,4 +240,30 @@ pub fn set_like(state: &Shared, id: &str, on: bool) {
     s.liked_edits += 1;
     // A partial set (the first full read still going, or stopped) is never saved: it would pass for complete.
     if s.liked_complete { save_liked_ids(&s.liked) }
+}
+
+#[test]
+#[ignore = "live: needs ~/.resona/credentials.json, the network and an audio device (cargo test -- --ignored)"]
+fn reconnect_brings_a_working_player() {
+    use librespot::core::SpotifyUri;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = std::env::home_dir().unwrap().join(".resona");
+        let cache = Cache::new(Some(&dir), None, None, None).unwrap();
+        let creds = cache.credentials().expect("signed in");
+        let mixer = Arc::new(SoftMixer::open(MixerConfig::default()).unwrap());
+        let (session, player) = start(cache, creds, &mixer).await.unwrap();
+        let e = Engine { player: RwLock::new(player), session: RwLock::new(session), web: Arc::new(api::WebAuth::new(&dir, REDIRECT).unwrap()), mixer, http: reqwest::Client::new() };
+        let song = SpotifyUri::from_uri("spotify:track:35JnXQJ4coVhXXjvTHoalE").unwrap();
+        let first = |mut ev: PlayerEventChannel| async move {
+            loop { match ev.recv().await.unwrap() { PlayerEvent::Unavailable { .. } => return false, PlayerEvent::Playing { .. } => return true, _ => {} } }
+        };
+        e.session().shutdown(); // what a lost connection does (minus the dropped socket)
+        assert!(e.session().is_invalid());
+        let ev = e.reconnect().await.unwrap();
+        assert!(!e.session().is_invalid());
+        e.player().load(song, true, 0);
+        assert!(first(ev).await);
+        e.player().stop();
+    });
 }

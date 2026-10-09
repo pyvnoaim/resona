@@ -174,7 +174,7 @@ impl Tui {
                 if let Some(t) = s.tracks.get(self.row) {
                     if let Some(id) = t.id.clone() { forget_unplayable(&mut s.unplayable, &id) } // another try
                     let (list, src) = (s.tracks.clone(), s.view.clone());
-                    s.start(&e.player, list, Some(self.row), src);
+                    s.start(&e.player(), list, Some(self.row), src);
                 }
             }
             KeyCode::Char(' ') => cmd(Cmd::Toggle),
@@ -204,7 +204,7 @@ impl Tui {
                 let mut s = state.lock().unwrap();
                 if let Some(t) = s.tracks.get(self.row).cloned() {
                     s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
-                    s.enqueue(&e.player, t, false);
+                    s.enqueue(&e.player(), t, false);
                 }
             }
             KeyCode::Char('.') => {

@@ -410,7 +410,7 @@ impl App {
             if let (Some(i), Some(e)) = (out.play, self.engine.get()) {
                 s.queued = s.queued.saturating_sub(i - s.qi);
                 s.dir = 1;
-                s.play_at(&e.player, i);
+                s.play_at(&e.player(), i);
             }
             if s.since.is_some() { self.bars_shown.set(true) } // the meter and lyric lines move
             drop(s);
@@ -462,7 +462,7 @@ impl App {
         if jump_row.is_some() || !s.loading && s.view.is_some() && self.jump.is_some() && !s.tracks.is_empty() { self.jump = None }
         let ctx = ui.ctx().clone();
         // Playlists a track can be added to: yours and the collaborative ones.
-        let me = self.engine.get().map(|e| e.session.username()).unwrap_or_default();
+        let me = self.engine.get().map(|e| e.session().username()).unwrap_or_default();
         let own: Vec<(String, String)> = s.playlists.iter().filter(|pl| pl.web_readable(&me)).map(|pl| (pl.id.clone(), pl.name.clone())).collect();
 
         skin::window(ui, Win::Main, &file, tag, None, |ui| {
@@ -764,21 +764,21 @@ impl App {
                 let at = s.qi + i;
                 s.queued = s.queued.saturating_sub(i);
                 s.dir = 1;
-                s.play_at(&e.player, at);
+                s.play_at(&e.player(), at);
             } else {
                 let (list, src) = (s.tracks.clone(), s.view.clone());
-                s.start(&e.player, list, Some(i), src);
+                s.start(&e.player(), list, Some(i), src);
             }
         }
         if let (Some((t, next)), Some(e)) = (enqueue, self.engine.get()) {
             s.notice = Some(format!("{} \u{201c}{}\u{201d}", if next { "Playing next:" } else { "Queued:" }, t.name));
-            s.enqueue(&e.player, t, next);
+            s.enqueue(&e.player(), t, next);
         }
         if resort { s.cycle_sort() }
         if let (Some(shuffled), Some(e)) = (play_all, self.engine.get()) {
             if shuffled { s.shuffle = true }
             let (list, src) = (s.tracks.clone(), s.view.clone());
-            s.start(&e.player, list, None, src);
+            s.start(&e.player(), list, None, src);
         }
         drop(s); // toggle_like locks the state itself
         self.hovered = hovered;

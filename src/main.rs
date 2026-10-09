@@ -116,7 +116,7 @@ impl App {
         let (Some(e), Some(id)) = (self.engine.get(), s.now.as_ref().and_then(|t| t.id.clone())) else { return };
         if s.lyrics.as_ref().is_some_and(|(have, _)| *have == id) { return }
         s.lyrics = Some((id.clone(), Lyrics::Loading));
-        let (state, session) = (self.state.clone(), e.session.clone());
+        let (state, session) = (self.state.clone(), e.session());
         self.rt.spawn(async move {
             let got = match SpotifyId::from_base62(track_id(&id)) {
                 Ok(sid) => librespot::metadata::Lyrics::get(&session, &sid).await.ok(),
@@ -158,7 +158,7 @@ impl App {
     fn load_members(&self) {
         let Some(e) = self.engine.get() else { return };
         if std::mem::replace(&mut self.state.lock().unwrap().members_asked, true) { return }
-        self.rt.spawn(load_members(self.state.clone(), e.web.clone(), e.http.clone(), e.session.username()));
+        self.rt.spawn(load_members(self.state.clone(), e.web.clone(), e.http.clone(), e.session().username()));
     }
 
     fn toggle_like(&self, id: String) {
@@ -220,13 +220,13 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     }
     if let Some(key) = src.key() { set_setting("last", &key) }
     let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
-    let me = e.session.username();
+    let me = e.session().username();
     let foreign = match &src {
         Source::Playlist(id) => state.lock().unwrap().playlists.iter().any(|p| &p.id == id && !p.web_readable(&me)),
         _ => false,
     };
     if let (true, Source::Playlist(id)) = (foreign, src.clone()) {
-        let (session, sort) = (e.session.clone(), state.lock().unwrap().sort);
+        let (session, sort) = (e.session(), state.lock().unwrap().sort);
         rt.spawn(async move {
             let done = api::session_playlist(&session, &id, sort, |tracks, total| {
                 let mut s = state.lock().unwrap();
@@ -248,7 +248,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     }
     if matches!(src, Source::Artist { .. } | Source::Album { .. }) {
         // Artist and album pages come through the session, like the official client.
-        let session = e.session.clone();
+        let session = e.session();
         rt.spawn(async move {
             let got = match &src {
                 Source::Artist { id, .. } => match api::session_artist(&session, id).await {
@@ -362,28 +362,28 @@ pub fn command(e: &Engine, s: &mut State, cmd: Cmd) {
     let start_open_list = |s: &mut State| {
         // Nothing loaded yet: play the open list from the top.
         let (list, src) = (s.tracks.clone(), s.view.clone());
-        if !list.is_empty() { s.start(&e.player, list, None, src) }
+        if !list.is_empty() { s.start(&e.player(), list, None, src) }
     };
     match cmd {
         Cmd::Toggle if s.now.is_none() => start_open_list(s),
-        Cmd::Toggle => if s.since.is_some() { e.player.pause() } else { e.player.play() },
+        Cmd::Toggle => if s.since.is_some() { e.player().pause() } else { e.player().play() },
         Cmd::Play if s.now.is_none() => start_open_list(s),
-        Cmd::Play => e.player.play(),
-        Cmd::Pause => e.player.pause(),
-        Cmd::Next => { let from = s.qi; s.step(&e.player, from, 1); }
+        Cmd::Play => e.player().play(),
+        Cmd::Pause => e.player().pause(),
+        Cmd::Next => { let from = s.qi; s.step(&e.player(), from, 1); }
         Cmd::Prev => {
             // Like every player: restart the song unless we're at its very start.
             let from = s.qi;
-            if pos > 3000 || !s.step(&e.player, from, -1) { e.player.seek(0) }
+            if pos > 3000 || !s.step(&e.player(), from, -1) { e.player().seek(0) }
         }
-        Cmd::SeekTo(ms) => e.player.seek(ms),
+        Cmd::SeekTo(ms) => e.player().seek(ms),
         Cmd::Shuffle => {
             s.toggle_shuffle();
             if s.shuffle && s.now.is_none() { start_open_list(s) }
         }
         Cmd::SeekBy(d) => {
             let dur = s.now.as_ref().map_or(0, |t| t.duration_ms) as i64;
-            e.player.seek((pos as i64 + d).clamp(0, dur.max(1) - 1) as u32);
+            e.player().seek((pos as i64 + d).clamp(0, dur.max(1) - 1) as u32);
         }
     }
 }
@@ -431,6 +431,8 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // librespot says why a song failed only in its log: `RUST_LOG=warn ./resona 2>resona.log`.
+    env_logger::init();
     if std::env::args().nth(1).as_deref() == Some("cli") {
         cli::run();
         return Ok(());
