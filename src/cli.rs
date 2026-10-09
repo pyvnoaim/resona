@@ -188,7 +188,7 @@ impl Tui {
                 e.mixer.set_volume((self.volume * u16::MAX as f32) as u16);
                 set_setting("volume", &format!("{:.2}", self.volume));
             }
-            KeyCode::Char('s') => state.lock().unwrap().toggle_shuffle(),
+            KeyCode::Char('s') => cmd(Cmd::Shuffle),
             KeyCode::Char('r') => state.lock().unwrap().cycle_repeat(),
             KeyCode::Char('/') => self.search = Some(String::new()),
             // The selected song, or the playing one while the lists have focus.

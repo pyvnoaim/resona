@@ -64,7 +64,9 @@ font's default instance.
   The menu bar owns the ⌘ shortcuts (`keys()` skips them when the menu exists, or they'd fire twice). Plain-key
   shortcuts (Space, S, R, …) are only named in menu titles: as menu key equivalents they'd fire while typing.
 - **Queue:** `queue` is the list being played (shuffled or not), `base` its original order, `queued` the hand-added
-  songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded.
+  songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded. Shuffle is our own
+  (`spread_shuffle`): each artist's songs are spaced evenly through the queue; switched on with nothing playing,
+  it starts the open list.
 - **Rate limits:** `api::get` retries short `retry-after` waits and turns anything over 60s into an error.
   librespot has its own limiter too: 300 session requests per 30 s, then 10/s, shared with playback. Session
   loaders go through `api::patient` (waits it out) and `session_playlist` paces itself past 200 songs; a starved

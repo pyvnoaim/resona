@@ -103,6 +103,8 @@ pub enum Cmd {
     Prev,
     SeekTo(u32),
     SeekBy(i64),
+    /// Shuffle on / off; switched on with nothing playing, it starts the open list at a random song.
+    Shuffle,
 }
 
 #[derive(Default)]
@@ -189,7 +191,7 @@ impl State {
         let mut first = at.unwrap_or(0);
         if self.shuffle {
             let pick = at.map(|i| self.queue.remove(i));
-            shuffle(&mut self.queue, seed());
+            spread_shuffle(&mut self.queue, seed());
             if let Some(t) = pick { self.queue.insert(0, t) }
             first = 0;
         }
@@ -218,7 +220,7 @@ impl State {
         let now = self.now.as_ref().and_then(|t| t.id.clone());
         if on {
             let mut rest: Vec<api::Track> = self.base.iter().filter(|t| t.id != now).cloned().collect();
-            shuffle(&mut rest, seed());
+            spread_shuffle(&mut rest, seed());
             self.queue = self.now.iter().cloned().chain(rest).collect();
             self.qi = 0;
         } else {
@@ -324,6 +326,32 @@ pub fn shuffle<T>(v: &mut [T], mut seed: u64) {
     }
 }
 
+/// Shuffle that keeps an artist's songs apart (like Spotify's): each artist's songs get evenly spaced
+/// slots across the queue from a random start, nudged a little, and the queue is sorted by slot.
+pub fn spread_shuffle(tracks: &mut Vec<api::Track>, mut seed: u64) {
+    let mut rand = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut by_artist: HashMap<String, Vec<api::Track>> = HashMap::new();
+    for t in tracks.drain(..) {
+        by_artist.entry(t.artists.first().map(|a| a.name.clone()).unwrap_or_default()).or_default().push(t);
+    }
+    let mut slotted = Vec::new();
+    for (_, mut songs) in by_artist {
+        shuffle(&mut songs, (rand() * u64::MAX as f64) as u64 | 1);
+        let gap = 1.0 / songs.len() as f64;
+        let start = rand() * gap;
+        for (k, t) in songs.into_iter().enumerate() {
+            slotted.push((start + k as f64 * gap + (rand() - 0.5) * gap * 0.2, t));
+        }
+    }
+    slotted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    tracks.extend(slotted.into_iter().map(|(_, t)| t));
+}
+
 pub fn seed() -> u64 {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     nanos | 1 // xorshift must not start at 0
@@ -359,6 +387,20 @@ pub fn skipping_passes_refused_tracks_in_both_directions() {
     assert_eq!(next_playable(&q, &skip, 3, -1), Some(0));
     assert_eq!(next_playable(&q, &skip, 3, 1), None);
     assert_eq!(next_playable(&q, &skip, 0, -1), None);
+}
+
+#[test]
+fn spread_shuffle_keeps_every_song_and_artists_apart() {
+    let t = |artist: &str, pos| api::Track { artists: vec![api::Named { name: artist.into(), ..Default::default() }], pos, ..Default::default() };
+    for s in 1..20 {
+        let mut v: Vec<api::Track> = (0..30).map(|i| t(["a", "b", "c"][i % 3], i)).collect();
+        spread_shuffle(&mut v, s * 7919);
+        let together = v.windows(2).filter(|w| w[0].artists[0].name == w[1].artists[0].name).count();
+        assert!(together <= 2, "seed {s}: {together} same-artist neighbours"); // plain shuffle averages ~9
+        let mut pos: Vec<usize> = v.iter().map(|t| t.pos).collect();
+        pos.sort();
+        assert_eq!(pos, (0..30).collect::<Vec<_>>());
+    }
 }
 
 #[test]

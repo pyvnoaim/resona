@@ -183,7 +183,10 @@ impl App {
     }
 
     fn toggle_shuffle(&mut self) {
-        self.state.lock().unwrap().toggle_shuffle()
+        match self.engine.get() {
+            Some(_) => self.command(Cmd::Shuffle),
+            None => self.state.lock().unwrap().toggle_shuffle(), // not signed in yet: nothing to start
+        }
     }
 
     fn cycle_repeat(&mut self) {
@@ -374,6 +377,10 @@ pub fn command(e: &Engine, s: &mut State, cmd: Cmd) {
             if pos > 3000 || !s.step(&e.player, from, -1) { e.player.seek(0) }
         }
         Cmd::SeekTo(ms) => e.player.seek(ms),
+        Cmd::Shuffle => {
+            s.toggle_shuffle();
+            if s.shuffle && s.now.is_none() { start_open_list(s) }
+        }
         Cmd::SeekBy(d) => {
             let dur = s.now.as_ref().map_or(0, |t| t.duration_ms) as i64;
             e.player.seek((pos as i64 + d).clamp(0, dur.max(1) - 1) as u32);
