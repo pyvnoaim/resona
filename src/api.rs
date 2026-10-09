@@ -412,6 +412,16 @@ async fn patient<T, E: std::fmt::Display, F: std::future::Future<Output = Result
     call().await
 }
 
+/// Whether Spotify itself refuses this song here (region, licensing, no files and no stand-in), as opposed to
+/// a load that just failed: librespot reports a lost audio key or CDN hiccup as `Unavailable` too.
+pub async fn refused(session: &Session, id: &str) -> bool {
+    let Ok(uri) = SpotifyUri::from_uri(&format!("spotify:track:{id}")) else { return true };
+    match patient(|| metadata::audio::AudioItem::get_file(session, uri.clone())).await {
+        Ok(a) => a.availability.is_err() || (a.files.is_empty() && a.alternatives.as_ref().is_none_or(|t| t.is_empty())),
+        Err(_) => false, // can't tell: don't fade a song for good on a guess
+    }
+}
+
 impl From<metadata::Track> for Track {
     fn from(t: metadata::Track) -> Self {
         // Largest first, smallest last, like the Web API (`thumb()` takes the last one).
@@ -547,3 +557,19 @@ fn patient_waits_out_the_limiter_and_passes_other_errors_straight_through() {
 }
 
 
+
+#[test]
+#[ignore = "live: needs ~/.resona/credentials.json and the network (cargo test -- --ignored)"]
+fn refused_tells_a_refused_song_from_a_playable_one() {
+    use librespot::core::{cache::Cache, config::SessionConfig};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cache = Cache::new(Some(std::env::home_dir().unwrap().join(".resona")), None, None, None).unwrap();
+        let creds = cache.credentials().expect("signed in");
+        let session = Session::new(SessionConfig::default(), Some(cache));
+        session.connect(creds, true).await.unwrap();
+        assert!(refused(&session, "6BJXuY0lY0EUtSDCgkYnqE").await); // no files, no stand-in
+        assert!(!refused(&session, "35JnXQJ4coVhXXjvTHoalE").await); // plays
+        assert!(!refused(&session, "7GN6EEENu7xnl2lEipjN4X").await); // plays through its stand-in
+    });
+}

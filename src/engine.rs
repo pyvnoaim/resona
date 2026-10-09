@@ -101,10 +101,22 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
     // Hearts: ~/.resona/liked at once, then the whole set fresh through the session (one request).
     if let Some(ids) = load_liked_ids() { let mut s = state.lock().unwrap(); (s.liked, s.liked_complete) = (ids, true) }
     tokio::spawn(load_liked(state.clone(), engine.session.clone(), ctx.clone()));
+    let session = engine.session.clone();
     let _ = slot.set(engine);
     set("");
 
+    let mut retried: Option<String> = None; // the song that already got its second try
     while let Some(ev) = events.recv().await {
+        // Any failed load comes as Unavailable (a lost audio key, a CDN hiccup), so for the song we're on, ask
+        // Spotify's metadata whether it really refuses it. Asked before the lock, so the UI never waits on it.
+        let refused = match &ev {
+            PlayerEvent::Unavailable { track_id, .. } => {
+                let id = track_id.to_id().ok();
+                let ours = id.is_some() && { let s = state.lock().unwrap(); !s.loading && s.now.as_ref().and_then(|t| t.id.clone()) == id };
+                match id { Some(id) if ours => api::refused(&session, &id).await, _ => false }
+            }
+            _ => false,
+        };
         let mut s = state.lock().unwrap();
         match ev {
             PlayerEvent::Playing { position_ms, .. } => (s.pos_ms, s.since) = (position_ms, Some(Instant::now())),
@@ -132,14 +144,19 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
                     ctx.request_repaint();
                     continue;
                 }
-                // Spotify won't play this one here (region, licensing). Remember it, say so, and keep going
-                // the way we were going, so "back" doesn't bounce off it forever.
+                let Some(id) = failed else { continue };
                 let (from, dir) = (s.qi, if s.dir == 0 { 1 } else { s.dir });
-                // No message: the song just fades in its list, like every refused one.
-                if let Some(id) = s.now.as_ref().and_then(|t| t.id.clone()) {
+                if refused {
+                    // No message: the song just fades in its list, like every refused one.
                     remember_unplayable(&id);
                     s.unplayable.insert(id);
+                } else if retried.as_ref() != Some(&id) { // a passing failure: one more try
+                    retried = Some(id);
+                    s.play_at(&player, from);
+                    ctx.request_repaint();
+                    continue;
                 }
+                // Keep going the way we were going, so "back" doesn't bounce off it forever.
                 if !s.step(&player, from, dir) { (s.pos_ms, s.since) = (0, None) }
             }
             _ => continue,
