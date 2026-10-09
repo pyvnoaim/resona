@@ -123,6 +123,15 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
                 // only a failure of the song we're on counts.
                 let failed = track_id.to_id().ok();
                 if failed.is_none() || failed != s.now.as_ref().and_then(|t| t.id.clone()) { continue }
+                // A list loading through the session starves librespot's request limiter, and the player then
+                // reports playable songs as Unavailable: stop instead of marking (and skipping) the whole list.
+                // ponytail: only covers list loads; a streak guard if other session bursts starve it too.
+                if s.loading {
+                    (s.pos_ms, s.since) = (0, None);
+                    s.error = Some("Spotify is busy while this list loads; play again in a moment".into());
+                    ctx.request_repaint();
+                    continue;
+                }
                 // Spotify won't play this one here (region, licensing). Remember it, say so, and keep going
                 // the way we were going, so "back" doesn't bounce off it forever.
                 let (from, dir) = (s.qi, if s.dir == 0 { 1 } else { s.dir });
