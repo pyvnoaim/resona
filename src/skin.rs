@@ -475,13 +475,16 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color
     let painter = ui.painter();
     match s {
         Skin::Wired => {
-            if current { painter.rect_filled(rect, 0.0, p.selected); } else if hovered {
-                painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, p.accent), StrokeKind::Inside);
+            if current { painter.rect_filled(rect, 0.0, p.selected); }
+            if hovered {
+                // On the playing row's fill the frame is drawn inset, in the fill's ink.
+                let (frame, ink) = if current { (rect.shrink(2.0), p.on_selected) } else { (rect, p.accent) };
+                painter.rect_stroke(frame, 0.0, Stroke::new(1.0_f32, ink), StrokeKind::Inside);
             }
             painter.extend(Shape::dashed_line(&[rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, p.line), 1.0, 2.0));
         }
         Skin::Swiss => {
-            if hovered && !current { painter.rect_filled(rect, 0.0, p.hover); }
+            if hovered { painter.rect_filled(rect, 0.0, p.hover); }
             painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, p.line));
         }
     }

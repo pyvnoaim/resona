@@ -236,11 +236,12 @@ pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32) -> Option<usize> {
 /// The "?" overlay: every shortcut, grouped, in the skin's own window style.
 pub fn help_overlay(ctx: &egui::Context) {
     let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
-    let groups: [(&str, &[(&str, &str)]); 4] = [
+    let groups: [(&str, &[(&str, &str)]); 5] = [
         ("Playback", &[("Space", "Play / pause"), ("⌘ →", "Next song"), ("⌘ ←", "Previous song"), ("→  ←", "Forward / back 10 s"), ("S", "Shuffle on / off"), ("R", "Repeat: off / all / one")]),
-        ("Volume", &[("↑  ↓", "Louder / quieter"), ("M", "Mute / unmute")]),
+        ("Move", &[("↑  ↓", "Up / down (J K too)"), ("Tab", "Sidebar / songs"), ("Enter", "Open the list / play the song"), ("PgUp PgDn", "Ten rows"), ("Home End", "Top / bottom")]),
+        ("Volume", &[("+  -", "Louder / quieter"), ("M", "Mute / unmute")]),
         ("Find & go", &[("⌘ F", "Search Spotify"), ("⌘ J", "Jump to the playing song"), ("⌘ E", "Cover + lyrics view"), ("Esc", "Back / close")]),
-        ("This song", &[("⌘ L", "Like / unlike"), ("⌘ ⇧ C", "Copy song link"), ("Q", "Add the row under the pointer to the queue"), ("⌘ ,", "Skin & theme menu"), ("?", "This list")]),
+        ("This song", &[("⌘ L", "Like / unlike"), ("L", "Like / unlike the highlighted song"), ("⌘ ⇧ C", "Copy song link"), ("Q", "Add the highlighted song to the queue"), ("⌘ ,", "Skin & theme menu"), ("?", "This list")]),
     ];
     egui::Area::new(egui::Id::new("help")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
         let stroke = Stroke::new(1.0_f32, if sk == Skin::Wired { p.accent } else { p.line });
@@ -349,10 +350,23 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
     body(ui);
 }
 
+/// The sidebar's rows, top to bottom. Queue only shows up while you've queued songs by hand (or are looking at it).
+pub fn side_lists(s: &State) -> Vec<Source> {
+    let queue = (s.queued > 0 || s.view == Some(Source::Queue)).then_some(Source::Queue);
+    std::iter::once(Source::Liked).chain(queue).chain(s.playlists.iter().map(|p| Source::Playlist(p.id.clone()))).collect()
+}
+
+/// The pointer moved (or the wheel moved the rows under it): the row it is over takes the cursor.
+fn moused(ui: &egui::Ui) -> bool {
+    ui.input(|i| i.pointer.delta() != Vec2::ZERO || i.smooth_scroll_delta != Vec2::ZERO)
+}
+
 impl App {
     pub fn sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (l, p, sk) = (skin::look(ctx), skin::pal(ctx), skin::skin(ctx));
         let mut pick = None;
+        let (cursor, reveal, moused) = ((self.pane == Pane::Lists).then_some(self.side), self.reveal, moused(ui));
+        let (mut at, mut point) = (0, None);
         let s = self.state.lock().unwrap();
         skin::window(ui, Win::Library, "library.lst", "ライブラリ", None, |ui| {
             let margin = match sk {
@@ -375,8 +389,12 @@ impl App {
                     let mut row = |ui: &mut egui::Ui, n: usize, src: Source, img: Option<&str>, name: &str, owner: &str| {
                         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), l.side_row_h), Sense::click());
                         let selected = s.view.as_ref() == Some(&src);
+                        let on = cursor == Some(at);
+                        if on && reveal { r.scroll_to_me(None) }
+                        if moused && r.hovered() { point = Some(at) }
+                        at += 1;
                         match sk {
-                            Skin::Wired if selected || r.hovered() => {
+                            Skin::Wired if selected || on => {
                                 ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0_f32, p.accent), StrokeKind::Inside);
                             }
                             _ => {}
@@ -403,7 +421,7 @@ impl App {
                         } else {
                             match sk {
                                 Skin::Swiss => {
-                                    let ink = if selected || r.hovered() { p.accent } else { p.text };
+                                    let ink = if selected || on { p.accent } else { p.text };
                                     child.add_sized(vec2(30.0, 20.0), egui::Label::new(RichText::new(format!("{:02}", n + 1)).size(13.0).color(if selected { p.accent } else { p.dim })));
                                     let font = if selected { skin::title(14.0) } else { FontId::proportional(14.0) };
                                     child.add(egui::Label::new(RichText::new(name).font(font).color(ink)).truncate());
@@ -426,7 +444,7 @@ impl App {
                     };
                     let liked_name = "Liked Songs";
                     row(ui, 0, Source::Liked, None, liked_name, "");
-                    // Queue only shows up while you've queued songs by hand (or are looking at it).
+                    // The same rows, in the same order, as `side_lists`.
                     if s.queued > 0 || s.view == Some(Source::Queue) {
                         row(ui, 1, Source::Queue, None, "Queue", "");
                     }
@@ -439,8 +457,12 @@ impl App {
             });
         });
         drop(s);
+        if let Some(i) = point.filter(|i| cursor != Some(*i)) {
+            (self.pane, self.side) = (Pane::Lists, i);
+            ctx.request_repaint(); // draw the highlight where it is now
+        }
         if let Some(src) = pick {
-            self.big = false;
+            (self.big, self.pane) = (false, Pane::Songs); // the songs are next: arrows and Enter go there
             self.open(src, ctx)
         }
     }
@@ -497,13 +519,15 @@ impl App {
             _ => (what.to_uppercase(), if results { "RESULTS" } else { "TRACKS" }),
         };
         let kind = kind.as_str();
-        let (mut clicked, mut like, mut add, mut enqueue) = (None, None, None, None);
+        let (mut clicked, mut like, mut add, mut enqueue) = (self.enter.take(), None, None, None); // Enter plays like a click
         let mut want_members = false;
-        let (mut goto, mut play_all, mut hovered): (Option<Source>, Option<bool>, Option<api::Track>) = (None, None, None);
+        let (mut goto, mut play_all, mut point): (Option<Source>, Option<bool>, Option<usize>) = (None, None, None);
         let mut resort = false;
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
         let jump_row = self.jump.as_ref().and_then(|id| s.tracks.iter().position(|t| t.id.as_ref() == Some(id)));
         if jump_row.is_some() || !s.loading && s.view.is_some() && self.jump.is_some() && !s.tracks.is_empty() { self.jump = None }
+        if let Some(row) = jump_row { (self.pane, self.row) = (Pane::Songs, row) }
+        let (cursor, reveal, moused) = ((self.pane == Pane::Songs).then_some(self.row), self.reveal, moused(ui));
         let ctx = ui.ctx().clone();
         // Playlists a track can be added to: yours and the collaborative ones.
         let me = self.engine.get().map(|e| e.session().username()).unwrap_or_default();
@@ -679,6 +703,11 @@ impl App {
                     }
                     let total = s.tracks.len() + ghosts;
                     let mut draw = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
+                        if let (true, Some(row)) = (reveal, cursor) {
+                            // The cursor's row may be outside the rows laid out: place it from the first of them.
+                            let top = ui.cursor().top() + (row as f32 - range.start as f32) * l.row_h;
+                            ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(w, l.row_h)), None);
+                        }
                         for i in range {
                             let Some(t) = s.tracks.get(i) else {
                                 skin::ghost_row(ui, w, [c_num, c_title, if one_line { c_artist } else { c_album }, c_dur], i - s.tracks.len() == scan);
@@ -686,7 +715,9 @@ impl App {
                             };
                             let (rect, r) = ui.allocate_exact_size(vec2(w, l.row_h), Sense::click());
                             let current = t.id == now_id;
-                            let (ink, sub) = skin::row_bg(ui, rect, current, r.hovered());
+                            let on = cursor == Some(i);
+                            if moused && r.hovered() { point = Some(i) }
+                            let (ink, sub) = skin::row_bg(ui, rect, current, on);
                             // Songs Spotify refused this session fade out.
                             let (ink, sub) = if t.id.as_ref().is_some_and(|id| s.unplayable.contains(id)) { (p.dim.gamma_multiply(0.5), p.dim.gamma_multiply(0.4)) } else { (ink, sub) };
                             let (x, y) = (rect.left(), rect.center().y);
@@ -697,8 +728,6 @@ impl App {
                                 let n = if sk.blocky() || sk == Skin::Swiss { format!("{:02}", i + 1) } else { (i + 1).to_string() };
                                 ui.painter().text(pos2(x + c_num, y), egui::Align2::LEFT_CENTER, n, num_font.clone(), p.dim);
                             }
-                            // One left-aligned, truncated label per cell.
-                            if r.hovered() { hovered = Some(t.clone()) }
                             // One left-aligned, truncated label per cell; returns where its text landed.
                             let cell = |ui: &mut egui::Ui, from: f32, to: f32, text: String, size: f32, color| -> Rect {
                                 let cell = Rect::from_min_max(pos2(x + from, rect.top()), pos2(x + to, rect.bottom()));
@@ -742,7 +771,7 @@ impl App {
                             ui.painter().text(pos2(x + c_dur, y), egui::Align2::RIGHT_CENTER, mmss(t.duration_ms, sk.blocky()), time_font.clone(), sub);
                             if let Some(id) = &t.id {
                                 let heart = Rect::from_center_size(pos2(x + c_dur - 56.0, y), vec2(26.0, 26.0));
-                                if skin::heart_toggle(ui, heart, egui::Id::new(("like", i)), s.liked.contains(id), r.hovered(), current).clicked() {
+                                if skin::heart_toggle(ui, heart, egui::Id::new(("like", i)), s.liked.contains(id), on, current).clicked() {
                                     like = Some(id.clone());
                                 }
                             }
@@ -799,7 +828,8 @@ impl App {
             });
         });
 
-        if let (Some(i), Some(e)) = (clicked, self.engine.get()) {
+        // Enter can name a row the list no longer has (it emptied to load, the queue moved on).
+        if let (Some(i), Some(e)) = (clicked.filter(|i| *i < s.tracks.len()), self.engine.get()) {
             if let Some(id) = s.tracks.get(i).and_then(|t| t.id.clone()) {
                 forget_unplayable(&mut s.unplayable, &id); // a click gives a faded song another try
             }
@@ -825,7 +855,10 @@ impl App {
             s.start(&e.player(), list, None, src);
         }
         drop(s); // toggle_like locks the state itself
-        self.hovered = hovered;
+        if let Some(i) = point.filter(|i| cursor != Some(*i)) {
+            (self.pane, self.row) = (Pane::Songs, i);
+            ctx.request_repaint(); // draw the highlight where it is now
+        }
         if let Some(id) = like { self.toggle_like(id) }
         if let Some((playlist, name, track)) = add { self.add_to(playlist, name, track) }
         if want_members { self.load_members() }
@@ -979,6 +1012,14 @@ impl App {
         if open_big { self.big = true }
         if jump { self.jump_to_playing(ctx) }
     }
+}
+
+#[test]
+fn sidebar_lists_the_queue_only_while_it_shows() {
+    let mut s = State::default();
+    assert!(side_lists(&s) == [Source::Liked]);
+    s.queued = 1;
+    assert!(side_lists(&s) == [Source::Liked, Source::Queue]);
 }
 
 #[test]

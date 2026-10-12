@@ -50,6 +50,10 @@ impl Source {
     }
 }
 
+/// Which list the keyboard cursor is in: the sidebar or the open list's songs.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pane { Lists, Songs }
+
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum Repeat {
     #[default]

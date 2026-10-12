@@ -15,6 +15,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 serde = { version = "1", features = ["derive"] }
 souvlaki = { version = "0.8", default-features = false }
 muda = "0.21"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSCursor"] }
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 unicode-width = "0.2"
 protobuf = "3"

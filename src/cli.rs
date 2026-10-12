@@ -42,9 +42,6 @@ const KEYS: &[(&str, &str)] = &[
     ("l", "like"), ("a", "queue"), ("o", "sort"), ("t", "style"), ("^L", "redraw"),
 ];
 
-#[derive(Clone, Copy, PartialEq)]
-enum Pane { Lists, Songs }
-
 /// `t` switches: a centred card of titled boxes on the terminal's own background (like flow), or a full-width
 /// painted board (like devboard). Remembered as `cli_style` in ~/.resona/settings.
 #[derive(Clone, Copy, PartialEq)]
@@ -183,7 +180,7 @@ impl Tui {
             KeyCode::Right => cmd(Cmd::SeekBy(10_000)),
             KeyCode::Left => cmd(Cmd::SeekBy(-10_000)),
             KeyCode::Char(c @ ('+' | '=' | '-')) => {
-                // Whole 5% steps, like the window's arrow keys: 54% goes up to 60, down to 50.
+                // Whole 5% steps, like the window's + and -: 54% goes up to 60, down to 50.
                 self.volume = ((self.volume + if c == '-' { -0.05 } else { 0.05 }) * 20.0).round().clamp(0.0, 20.0) / 20.0;
                 e.mixer.set_volume((self.volume * u16::MAX as f32) as u16);
                 set_setting("volume", &format!("{:.2}", self.volume));

@@ -5,7 +5,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::skin::{self, Skin};
-use crate::{App, settings::*, state::*};
+use crate::{App, settings::*, state::*, ui::side_lists};
 
 impl App {
     /// The macOS menu bar: every action with its shortcut, so they're discoverable. ⌘ shortcuts are real
@@ -28,8 +28,8 @@ impl App {
                 &item("shuffle", "Shuffle (S)", None),
                 &item("repeat", "Repeat: Off / All / One (R)", None),
                 &sep(),
-                &item("louder", "Louder (↑)", None),
-                &item("quieter", "Quieter (↓)", None),
+                &item("louder", "Louder (+)", None),
+                &item("quieter", "Quieter (-)", None),
                 &item("mute", "Mute / Unmute (M)", None),
             ])?;
             let skins = Submenu::with_items("Skin", true, &[&item("skin:Wired", "Wired", None), &item("skin:Swiss", "Swiss", None)])?;
@@ -47,7 +47,7 @@ impl App {
             let song = Submenu::with_items("Song", true, &[
                 &item("like", "Like / Unlike", Some("CmdOrCtrl+L")),
                 &item("copy", "Copy Song Link", Some("CmdOrCtrl+Shift+C")),
-                &item("queue", "Add Song Under Pointer to Queue (Q)", None),
+                &item("queue", "Add Highlighted Song to Queue (Q)", None),
             ])?;
             let window = Submenu::with_items("Window", true, &[&Pre::minimize(None), &Pre::fullscreen(None)])?;
             let help = Submenu::with_items("Help", true, &[&item("help", "Keyboard Shortcuts (?)", None)])?;
@@ -95,9 +95,7 @@ impl App {
                 "settings" => ctx.data_mut(|d| d.insert_temp(egui::Id::new("open-menu"), true)),
                 "like" => if let Some(id) = now_id { self.toggle_like(id) },
                 "copy" => if let Some(id) = now_id { ctx.copy_text(format!("https://open.spotify.com/track/{id}")) },
-                "queue" => if let (Some(t), Some(e)) = (self.hovered.clone(), self.engine.get()) {
-                    self.state.lock().unwrap().enqueue(&e.player(), t, false);
-                },
+                "queue" => self.queue_cursor(),
                 "help" => self.help = !self.help,
                 other => {
                     if let Some(name) = other.strip_prefix("skin:") && let Some(sk) = Skin::ALL.into_iter().find(|s| format!("{s:?}") == name) {
@@ -174,12 +172,27 @@ impl App {
         self.media_sent = sent;
     }
 
+    /// Q: the song under the cursor goes to the end of the queue.
+    fn queue_cursor(&mut self) {
+        let Some(e) = self.engine.get() else { return };
+        if self.big { return } // no list on screen, so no highlighted song
+        let mut s = self.state.lock().unwrap();
+        if let (Pane::Songs, Some(t)) = (self.pane, s.tracks.get(self.row).cloned()) {
+            s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
+            s.enqueue(&e.player(), t, false);
+        }
+    }
+
     /// The keyboard (see the "?" overlay). Nothing fires while you're typing in the search box.
     pub fn keys(&mut self, ctx: &egui::Context) {
         use egui::Key;
+        let tab = std::mem::take(&mut self.tab);
         if ctx.wants_keyboard_input() { return }
+        if !tab && !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { .. }))) { return } // no key, nothing to do
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         let hit = |k: Key| ctx.input(|i| i.key_pressed(k));
+        // Not while the key is held: a repeated L would be a burst of likes, a repeated Enter of restarts.
+        let once = |k: Key| ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == k)));
         if hit(Key::Escape) {
             if self.help { self.help = false } else { self.big = false }
         }
@@ -206,8 +219,8 @@ impl App {
         if hit(Key::ArrowRight) { self.command(Cmd::SeekBy(10_000)) }
         if hit(Key::ArrowLeft) { self.command(Cmd::SeekBy(-10_000)) }
         let step = |v: f32| (v * 20.0).round() / 20.0; // whole 5% steps
-        if hit(Key::ArrowUp) { self.set_volume(step(self.volume + 0.05)); set_setting("volume", &format!("{:.2}", self.volume)) }
-        if hit(Key::ArrowDown) { self.set_volume(step(self.volume - 0.05)); set_setting("volume", &format!("{:.2}", self.volume)) }
+        if hit(Key::Plus) || hit(Key::Equals) { self.set_volume(step(self.volume + 0.05)); set_setting("volume", &format!("{:.2}", self.volume)) }
+        if hit(Key::Minus) { self.set_volume(step(self.volume - 0.05)); set_setting("volume", &format!("{:.2}", self.volume)) }
         if hit(Key::M) {
             match self.muted.take() {
                 Some(v) => self.set_volume(v),
@@ -216,10 +229,37 @@ impl App {
         }
         if hit(Key::S) { self.toggle_shuffle() }
         if hit(Key::R) { self.cycle_repeat() }
-        if hit(Key::Q) && let (Some(t), Some(e)) = (self.hovered.clone(), self.engine.get()) {
-            let mut s = self.state.lock().unwrap();
-            s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
-            s.enqueue(&e.player(), t, false);
+        if once(Key::Q) { self.queue_cursor() }
+        // No list to move through: the cover view is up, or the help or a menu is over it.
+        if self.big || self.help || egui::Popup::is_any_open(ctx) { return }
+        // The highlighted song, or the playing one while the cursor is in the sidebar.
+        let song = if self.pane == Pane::Songs { self.state.lock().unwrap().tracks.get(self.row).cloned() } else { now };
+        if once(Key::L) && let Some(id) = song.and_then(|t| t.id) { self.toggle_like(id) }
+        if tab {
+            self.pane = if self.pane == Pane::Lists { Pane::Songs } else { Pane::Lists };
+            self.reveal = true;
+        }
+        let lists = side_lists(&self.state.lock().unwrap());
+        let (cur, len) = match self.pane { Pane::Lists => (&mut self.side, lists.len()), Pane::Songs => (&mut self.row, self.state.lock().unwrap().tracks.len()) };
+        let last = len.saturating_sub(1);
+        *cur = (*cur).min(last); // the list may have got shorter under the cursor
+        let was = *cur;
+        let page = 10; // ponytail: a fixed stride, the visible row count if it should match the window
+        if hit(Key::ArrowUp) || hit(Key::K) { *cur = cur.saturating_sub(1) }
+        if hit(Key::ArrowDown) || hit(Key::J) { *cur = (*cur + 1).min(last) }
+        if hit(Key::PageUp) { *cur = cur.saturating_sub(page) }
+        if hit(Key::PageDown) { *cur = (*cur + page).min(last) }
+        if hit(Key::Home) { *cur = 0 }
+        if hit(Key::End) { *cur = last }
+        if *cur != was { self.reveal = true }
+        if once(Key::Enter) {
+            match self.pane {
+                Pane::Songs => self.enter = Some(self.row),
+                Pane::Lists => if let Some(src) = lists.into_iter().nth(self.side) {
+                    self.pane = Pane::Songs;
+                    self.open(src, ctx);
+                },
+            }
         }
     }
 }

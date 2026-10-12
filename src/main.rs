@@ -47,8 +47,17 @@ struct App {
     muted: Option<f32>,
     /// The "?" keyboard help overlay.
     help: bool,
-    /// The row under the pointer, for Q (add to queue).
-    hovered: Option<api::Track>,
+    /// The cursor: the pane it's in and its row in the sidebar and in the open list. Arrows move it, and so
+    /// does the mouse, so there is one highlighted row for Enter, Q and L to act on.
+    pane: Pane,
+    side: usize,
+    row: usize,
+    /// A key moved the cursor this frame: scroll it into view.
+    reveal: bool,
+    /// Tab was pressed (`raw_input_hook` keeps it from egui).
+    tab: bool,
+    /// Enter on a song: the row to play, taken by the track list as if it were clicked.
+    enter: Option<usize>,
     /// macOS Now Playing / media keys, and what we last told it.
     media: Option<souvlaki::MediaControls>,
     media_rx: std::sync::mpsc::Receiver<souvlaki::MediaControlEvent>,
@@ -76,7 +85,12 @@ impl App {
             restored: false,
             muted: None,
             help: false,
-            hovered: None,
+            pane: Pane::Songs,
+            side: 0,
+            row: 0,
+            reveal: false,
+            tab: false,
+            enter: None,
             media: None,
             media_rx: std::sync::mpsc::channel().1,
             media_sent: (None, false, 0),
@@ -97,7 +111,8 @@ impl App {
         app
     }
 
-    fn open(&self, src: Source, ctx: &egui::Context) {
+    fn open(&mut self, src: Source, ctx: &egui::Context) {
+        if self.state.lock().unwrap().view.as_ref() != Some(&src) { self.row = 0 } // a new list: cursor to its top
         if let Some(e) = self.engine.get() { open_list(self.rt.handle(), e, &self.state, src, ctx) }
     }
 
@@ -388,7 +403,37 @@ pub fn command(e: &Engine, s: &mut State, cmd: Cmd) {
     }
 }
 
+/// Shows the cursor egui asked for this frame. egui-winit asks too, but winit 0.30 changes the cursor through
+/// AppKit cursor rects, and on macOS 27 the hand over buttons never showed that way.
+fn show_cursor(ctx: &egui::Context) {
+    use objc2_app_kit::NSCursor;
+    if !ctx.input(|i| i.focused && i.pointer.has_pointer()) { return } // not ours to set: another app is in front, or the pointer is elsewhere
+    // The arrow is set once, to take our hand back: set every frame it would fight the cursors AppKit
+    // shows by itself (the window's resize edges).
+    static OURS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let cursor = match ctx.output(|o| o.cursor_icon) {
+        egui::CursorIcon::PointingHand => NSCursor::pointingHandCursor(),
+        egui::CursorIcon::Text => NSCursor::IBeamCursor(),
+        egui::CursorIcon::Default if OURS.swap(false, std::sync::atomic::Ordering::Relaxed) => NSCursor::arrowCursor(),
+        _ => return, // the rest (the sidebar's resize arrows) stays with winit
+    };
+    if cursor != NSCursor::arrowCursor() { OURS.store(true, std::sync::atomic::Ordering::Relaxed) }
+    cursor.set();
+}
+
 impl eframe::App for App {
+    /// Tab switches panes. Left to egui it would hand focus to a button, and a focused widget takes the
+    /// plain-key shortcuts (and answers Space and Enter itself).
+    fn raw_input_hook(&mut self, _: &egui::Context, raw: &mut egui::RawInput) {
+        raw.events.retain(|e| match e {
+            egui::Event::Key { key: egui::Key::Tab, pressed, repeat, .. } => {
+                self.tab |= *pressed && !*repeat;
+                false
+            }
+            _ => true,
+        });
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.restore(ctx);
         self.sync_media();
@@ -419,6 +464,8 @@ impl eframe::App for App {
         let center = if self.big { ground(0, 0, 0, 0) } else { ground(half, edge, g, half) };
         egui::CentralPanel::default().frame(center).show(ctx, |ui| self.tracklist(ui));
         if self.help { help_overlay(ctx) }
+        self.reveal = false;
+        show_cursor(ctx);
 
         // Tick the clock only while music plays; idle costs nothing.
         if self.state.lock().unwrap().loading {

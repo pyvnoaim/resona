@@ -65,6 +65,12 @@ font's default instance.
 - **One way to drive playback:** buttons, media keys, the menu bar and the keyboard all call `command()` (the CLI too).
   The menu bar owns the ⌘ shortcuts (`keys()` skips them when the menu exists, or they'd fire twice). Plain-key
   shortcuts (Space, S, R, …) are only named in menu titles: as menu key equivalents they'd fire while typing.
+- **One cursor:** `App.pane` / `side` / `row` is the highlighted row. Arrows (J/K), PgUp/PgDn, Home/End move it,
+  Tab switches sidebar and songs, Enter opens or plays; moving the mouse over a row moves it too, so hover and
+  keyboard never disagree and Q / L act on that one row. `raw_input_hook` keeps Tab from egui: a widget it
+  focused would swallow the plain-key shortcuts.
+- **Mouse cursor:** `show_cursor` sets the `NSCursor` itself each frame; the hand egui asks for through winit's
+  cursor rects did not show on macOS 27.
 - **Queue:** `queue` is the list being played (shuffled or not), `base` its original order, `queued` the hand-added
   songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded. Shuffle is our own
   (`spread_shuffle`): each artist's songs are spaced evenly through the queue; switched on with nothing playing,

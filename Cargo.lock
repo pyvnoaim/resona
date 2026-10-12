@@ -4047,6 +4047,7 @@ dependencies = [
  "librespot",
  "librespot-oauth",
  "muda",
+ "objc2-app-kit 0.3.2",
  "protobuf",
  "reqwest",
  "serde",
