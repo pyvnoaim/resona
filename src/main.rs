@@ -33,6 +33,8 @@ struct App {
     scrub: Option<f32>,
     volume: f32,
     query: String,
+    /// The name being typed for a new playlist (the field under the sidebar's lists).
+    new_list: String,
     /// The big now-playing view (cover + lyrics) instead of the list.
     big: bool,
     /// Set while drawing a frame if the bouncing now-playing bars were on screen.
@@ -78,6 +80,7 @@ impl App {
             scrub: None,
             volume: 0.7,
             query: String::new(),
+            new_list: String::new(),
             big: false,
             bars_shown: Default::default(),
             jump: None,
@@ -166,6 +169,30 @@ impl App {
                 }
                 Err(err) => s.error = Some(err),
             }
+        });
+    }
+
+    /// Makes a playlist, puts it on top of the sidebar, and adds `track` to it if one came along.
+    pub(crate) fn new_playlist(&self, name: String, track: Option<String>, ctx: &egui::Context) {
+        let Some(e) = self.engine.get() else { return };
+        let (state, web, http, ctx) = (self.state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
+        self.rt.spawn(async move {
+            let made = api::create_playlist(&web, &http, &name).await;
+            let added = match (&made, &track) {
+                (Ok(pl), Some(t)) => api::add_to_playlist(&web, &http, &pl.id, t).await,
+                _ => Ok(()),
+            };
+            let mut s = state.lock().unwrap();
+            match made {
+                Ok(pl) => {
+                    s.members.entry(pl.id.clone()).or_default().extend(track.filter(|_| added.is_ok()));
+                    s.playlists.insert(0, pl);
+                    s.notice = Some(format!("Created {name}"));
+                    s.error = added.err();
+                }
+                Err(err) => s.error = Some(err),
+            }
+            ctx.request_repaint(); // nothing else redraws an idle window
         });
     }
 

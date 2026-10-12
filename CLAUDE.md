@@ -34,7 +34,7 @@ Delete the first two to sign in again (and `liked` too when switching accounts: 
 | `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand; `t` switches a flow-style card and a devboard-style board) on the same engine, `open_list` and `command` |
 | `src/state.rs` | `State` and the queue: `Source`, `Cmd`, `Repeat`, `start` / `step` / `enqueue` / `set_shuffle` |
 | `src/engine.rs` | librespot: `connect()` (sign-in, session, player, event loop), liked-songs and playlist-contents loaders |
-| `src/api.rs` | Web API (`get`, `WebAuth`, search, like, add to playlist) and the session loaders (`session_playlist`, `session_artist`, `session_album`) |
+| `src/api.rs` | Web API (`get`, `WebAuth`, search, like, create and add to playlist) and the session loaders (`session_playlist`, `session_artist`, `session_album`) |
 | `src/ui.rs` | the views: sidebar, track list, player bar, focus view, help overlay, sign-in screen |
 | `src/controls.rs` | input: keyboard, macOS menu bar (`muda`), media keys / Now Playing (`souvlaki`) |
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
@@ -80,7 +80,7 @@ font's default instance.
   loaders go through `api::patient` (waits it out) and `session_playlist` paces itself past 200 songs; a starved
   player reports a playable song as `Unavailable`.
 - **Spotify's February 2026 Web API changes:** saving and liking go through `/me/library` (by URI), playlist
-  contents through `/playlists/{id}/items`, search pages are 10. Check the changelog before adding an endpoint.
+  contents through `/playlists/{id}/items`, new playlists through `POST /me/playlists`, search pages are 10. Check the changelog before adding an endpoint.
 - **Session playlists** are read page by page (`/playlist/v2/playlist/{id}?from=&length=`): librespot's
   `Playlist::get` returns only the first part of a long list.
   Developer apps get day-long bans for bursts, so startup stays small: playlists and Liked Songs only; what's in

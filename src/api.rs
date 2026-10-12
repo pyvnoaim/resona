@@ -202,6 +202,12 @@ pub async fn add_to_playlist(auth: &WebAuth, http: &reqwest::Client, playlist: &
     send(auth, http, reqwest::Method::POST, &format!("playlists/{playlist}/items"), Some(body)).await.map(drop)
 }
 
+/// Makes a new, private, empty playlist of yours. `POST /me/playlists` since the 2026 changes (it was under `/users/{id}`).
+pub async fn create_playlist(auth: &WebAuth, http: &reqwest::Client, name: &str) -> Result<Playlist, String> {
+    let body = serde_json::json!({ "name": name, "public": false }).to_string();
+    send(auth, http, reqwest::Method::POST, "me/playlists", Some(body)).await?.json().await.map_err(|e| e.to_string())
+}
+
 /// Adds a track to Liked Songs, or removes it. Spotify moved saving to `/me/library` (by URI) in 2026;
 /// the old `/me/tracks?ids=` answers 403.
 pub async fn set_liked(auth: &WebAuth, http: &reqwest::Client, id: &str, on: bool) -> Result<(), String> {

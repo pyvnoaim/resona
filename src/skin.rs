@@ -349,14 +349,14 @@ pub fn section(ui: &mut egui::Ui, text: &str) {
 
 // ---------- search
 
-/// The search field. Returns the text edit's response (Enter = `lost_focus` + Enter pressed).
-pub fn search_box(ui: &mut egui::Ui, query: &mut String) -> Response {
+/// A text field (search, new playlist) with each skin's hint. Returns the text edit's response (Enter = `lost_focus` + Enter pressed).
+pub fn text_field(ui: &mut egui::Ui, id: &str, wired: &str, swiss: &str, query: &mut String) -> Response {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
-    let id = egui::Id::new("search");
+    let id = egui::Id::new(id);
     let focused = ui.memory(|m| m.has_focus(id));
     let (margin, hint, font, fill, stroke) = match s {
-        Skin::Wired => (egui::Margin::symmetric(8, 4), "search spotify_", num(20.0), p.surface, Stroke::new(1.0_f32, if focused { p.accent } else { p.line })),
-        Skin::Swiss => (egui::Margin::symmetric(0, 6), "Search", FontId::proportional(14.0), Color32::TRANSPARENT, Stroke::NONE),
+        Skin::Wired => (egui::Margin::symmetric(8, 4), wired, num(20.0), p.surface, Stroke::new(1.0_f32, if focused { p.accent } else { p.line })),
+        Skin::Swiss => (egui::Margin::symmetric(0, 6), swiss, FontId::proportional(14.0), Color32::TRANSPARENT, Stroke::NONE),
     };
     let r = egui::Frame::new().fill(fill).stroke(stroke).inner_margin(margin).show(ui, |ui| {
         ui.horizontal(|ui| {

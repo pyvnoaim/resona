@@ -364,7 +364,7 @@ fn moused(ui: &egui::Ui) -> bool {
 impl App {
     pub fn sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (l, p, sk) = (skin::look(ctx), skin::pal(ctx), skin::skin(ctx));
-        let mut pick = None;
+        let (mut pick, mut create) = (None, None);
         let (cursor, reveal, moused) = ((self.pane == Pane::Lists).then_some(self.side), self.reveal, moused(ui));
         let (mut at, mut point) = (0, None);
         let s = self.state.lock().unwrap();
@@ -378,7 +378,7 @@ impl App {
                     skin::section(ui, "Resona");
                     ui.add_space(4.0);
                 }
-                let r = skin::search_box(ui, &mut self.query);
+                let r = skin::text_field(ui, "search", "search spotify_", "Search", &mut self.query);
                 let query = self.query.trim();
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !query.is_empty() {
                     pick = Some(Source::Search(query.to_string()));
@@ -453,6 +453,11 @@ impl App {
                         let owner = pl.owner.as_ref().and_then(|o| o.display_name.as_deref()).unwrap_or("");
                         row(ui, i + 2, Source::Playlist(pl.id.clone()), img, &pl.name, owner);
                     }
+                    ui.add_space(8.0);
+                    let r = skin::text_field(ui, "new-list", "new playlist_", "New playlist", &mut self.new_list);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.new_list.trim().is_empty() {
+                        create = Some(std::mem::take(&mut self.new_list).trim().to_string());
+                    }
                 });
             });
         });
@@ -461,6 +466,7 @@ impl App {
             (self.pane, self.side) = (Pane::Lists, i);
             ctx.request_repaint(); // draw the highlight where it is now
         }
+        if let Some(name) = create { self.new_playlist(name, None, ctx) }
         if let Some(src) = pick {
             (self.big, self.pane) = (false, Pane::Songs); // the songs are next: arrows and Enter go there
             self.open(src, ctx)
@@ -520,7 +526,7 @@ impl App {
         };
         let kind = kind.as_str();
         let (mut clicked, mut like, mut add, mut enqueue) = (self.enter.take(), None, None, None); // Enter plays like a click
-        let mut want_members = false;
+        let (mut want_members, mut create) = (false, None);
         let (mut goto, mut play_all, mut point): (Option<Source>, Option<bool>, Option<usize>) = (None, None, None);
         let mut resort = false;
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
@@ -797,6 +803,12 @@ impl App {
                                 }
                                 ui.menu_button("Add to playlist", |ui| {
                                     want_members = true;
+                                    // Named after the song, as Spotify does.
+                                    if ui.button("+ New playlist").clicked() {
+                                        create = Some((t.name.clone(), id.clone()));
+                                        ui.close();
+                                    }
+                                    ui.separator();
                                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                                         for (pid, name) in &own {
                                             if s.members.get(pid).is_some_and(|m| m.contains(id)) {
@@ -861,6 +873,7 @@ impl App {
         }
         if let Some(id) = like { self.toggle_like(id) }
         if let Some((playlist, name, track)) = add { self.add_to(playlist, name, track) }
+        if let Some((name, track)) = create { self.new_playlist(name, Some(track), &ctx) }
         if want_members { self.load_members() }
         if let Some(src) = goto { self.open(src, &ctx) }
     }
