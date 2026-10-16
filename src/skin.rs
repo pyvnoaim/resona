@@ -3,6 +3,7 @@
 //!
 //! - Wired: Lain-style cyber/pixel. Square windows with title bars, red on black, pixel fonts.
 //! - Swiss: print-style. No chrome, a strict grid, huge type, one red rule.
+//! - Ascii: a teletype printout. Everything is a 7-bit character: +--[ frames ]--+, <3, [####----], Courier.
 
 use std::sync::Arc;
 
@@ -16,19 +17,21 @@ pub enum Skin {
     #[default]
     Wired,
     Swiss,
+    Ascii,
 }
 
 impl Skin {
-    pub const ALL: [Skin; 2] = [Skin::Wired, Skin::Swiss];
+    pub const ALL: [Skin; 3] = [Skin::Wired, Skin::Swiss, Skin::Ascii];
 
-    /// The terminal look: block meters, pixel icons, block cursors, zero-padded times.
+    /// The terminal looks: block cursors, zero-padded times, capitals.
     pub fn blocky(self) -> bool {
-        self == Skin::Wired
+        self != Skin::Swiss
     }
     pub fn label(self) -> &'static str {
         match self {
             Skin::Wired => "Wired",
             Skin::Swiss => "Swiss",
+            Skin::Ascii => "ASCII",
         }
     }
 }
@@ -66,10 +69,25 @@ pub enum Accent {
     Violet,
     Amber,
     Pink,
+    /// Your own colour: each skin and theme shows a readable shade of it (`readable`).
+    Custom([u8; 3]),
 }
 
 impl Accent {
+    /// The named ones, in swatch order.
     pub const ALL: [Accent; 6] = [Accent::Red, Accent::Blue, Accent::Teal, Accent::Violet, Accent::Amber, Accent::Pink];
+
+    /// How it's saved and shown: the name, or `#rrggbb`.
+    pub fn key(self) -> String {
+        match self {
+            Accent::Custom([r, g, b]) => format!("#{r:02x}{g:02x}{b:02x}"),
+            a => format!("{a:?}"),
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Accent> {
+        Accent::ALL.into_iter().find(|a| a.key() == s).or_else(|| hex(s).map(Accent::Custom))
+    }
 
     /// (dark theme, light theme); None keeps the skin's red.
     fn shades(self) -> Option<(Color32, Color32)> {
@@ -80,7 +98,56 @@ impl Accent {
             Accent::Violet => Some((rgb(165, 110, 255), rgb(110, 52, 206))),
             Accent::Amber => Some((rgb(255, 170, 30), rgb(176, 104, 0))),
             Accent::Pink => Some((rgb(255, 84, 170), rgb(196, 26, 116))),
+            Accent::Custom(_) => None, // made per skin and theme in `custom_pal`
         }
+    }
+}
+
+/// `#rgb` or `#rrggbb` (the `#` optional) as red, green, blue.
+pub fn hex(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    if !s.chars().all(|c| c.is_ascii_hexdigit()) { return None }
+    let d = |at: usize, n: usize| u8::from_str_radix(&s[at..at + n], 16).ok();
+    match s.len() {
+        6 => Some([d(0, 2)?, d(2, 2)?, d(4, 2)?]),
+        3 => Some([d(0, 1)? * 17, d(1, 1)? * 17, d(2, 1)? * 17]),
+        _ => None,
+    }
+}
+
+/// WCAG contrast between two colours, 1 to 21.
+fn contrast(a: Color32, b: Color32) -> f32 {
+    let lin = |v: u8| { let v = v as f32 / 255.0; if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+    let lum = |c: Color32| 0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b());
+    let (x, y) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+    (x + 0.05) / (y + 0.05)
+}
+
+/// `c` on `ground`: pulled toward black on a light ground or white on a dark one, in 5% steps, until it stands out
+/// at 3:1 (every built-in accent does). The shade, and how far it moved in percent.
+pub fn readable(c: Color32, ground: Color32, light: bool) -> (Color32, u8) {
+    let to = if light { 0.0 } else { 255.0 };
+    for step in 0..=20u8 {
+        let k = step as f32 / 20.0;
+        let mix = |v: u8| (v as f32 + (to - v as f32) * k).round() as u8;
+        let m = rgb(mix(c.r()), mix(c.g()), mix(c.b()));
+        if contrast(m, ground) >= 3.0 { return (m, step * 5) }
+    }
+    (if light { Color32::BLACK } else { Color32::WHITE }, 100)
+}
+
+#[test]
+fn custom_accents_stay_readable_and_round_trip() {
+    assert_eq!(hex("#ff8800"), Some([255, 136, 0]));
+    assert_eq!(hex("f80"), Some([255, 136, 0]));
+    assert_eq!((hex("#ff880"), hex("#gg8800")), (None, None));
+    assert_eq!(Accent::parse(&Accent::Custom([255, 136, 0]).key()), Some(Accent::Custom([255, 136, 0])));
+    assert_eq!(Accent::parse("Blue"), Some(Accent::Blue));
+    // Orange on black is fine as it is; near-white on paper and near-black on black get pulled until they read.
+    assert_eq!(readable(rgb(255, 136, 0), WIRED_DARK.panel, false), (rgb(255, 136, 0), 0));
+    for (c, ground, light) in [(rgb(245, 245, 245), SWISS_LIGHT.panel, true), (rgb(16, 24, 32), WIRED_DARK.panel, false)] {
+        let (shade, moved) = readable(c, ground, light);
+        assert!(moved > 0 && contrast(shade, ground) >= 3.0, "{c:?} -> {shade:?}");
     }
 }
 
@@ -200,6 +267,40 @@ const SWISS_DARK: Pal = Pal {
     track: rgb(58, 57, 54),
 };
 
+/// Paper-coloured type on carbon. `surface` is the faint band every other pair of rows sits on.
+const ASCII_DARK: Pal = Pal {
+    ground: rgb(14, 14, 14),
+    panel: rgb(20, 20, 20),
+    surface: rgb(27, 27, 25),
+    hover: rgb(34, 33, 31),
+    line: rgb(61, 59, 54),
+    text: rgb(220, 215, 202),
+    dim: rgb(122, 118, 108),
+    accent: rgb(229, 72, 77),
+    on_accent: rgb(0, 0, 0),
+    online: rgb(107, 200, 120),
+    selected: rgb(229, 72, 77),
+    on_selected: rgb(0, 0, 0),
+    track: rgb(61, 59, 54),
+};
+
+/// Tractor-feed printout: black and red ribbon on paper, green bands on every other pair of rows.
+const ASCII_LIGHT: Pal = Pal {
+    ground: rgb(232, 228, 216),
+    panel: rgb(243, 240, 230),
+    surface: rgb(228, 236, 223),
+    hover: rgb(233, 229, 216),
+    line: rgb(185, 179, 163),
+    text: rgb(29, 29, 27),
+    dim: rgb(125, 120, 108),
+    accent: rgb(200, 16, 46),
+    on_accent: rgb(255, 255, 255),
+    online: rgb(30, 122, 58),
+    selected: rgb(200, 16, 46),
+    on_selected: rgb(255, 255, 255),
+    track: rgb(185, 179, 163),
+};
+
 /// Sizes that differ per skin.
 pub struct Look {
     pub dark: Pal,
@@ -246,6 +347,20 @@ pub static SWISS: Look = Look {
     pad: 36,
 };
 
+pub static ASCII: Look = Look {
+    dark: ASCII_DARK,
+    light: ASCII_LIGHT,
+    gap: 8,
+    edge: 14,
+    row_h: 30.0,
+    side_row_h: 30.0,
+    side_cover: 0.0,
+    header_cover: 132.0,
+    title_size: 52.0,
+    player_h: 128.0,
+    pad: 28,
+};
+
 pub fn skin(ctx: &egui::Context) -> Skin {
     ctx.data(|d| d.get_temp(egui::Id::new("skin"))).unwrap_or_default()
 }
@@ -258,16 +373,37 @@ fn look_of(skin: Skin) -> &'static Look {
     match skin {
         Skin::Wired => &WIRED,
         Skin::Swiss => &SWISS,
+        Skin::Ascii => &ASCII,
     }
 }
 
+/// The accent on screen: one being tried in the skin menu (`peek_accent`), else the kept one.
 pub fn accent(ctx: &egui::Context) -> Accent {
+    ctx.data(|d| d.get_temp(egui::Id::new("accent-peek"))).unwrap_or_else(|| kept_accent(ctx))
+}
+
+/// The accent that's saved and on the Dock icon.
+pub fn kept_accent(ctx: &egui::Context) -> Accent {
     ctx.data(|d| d.get_temp(egui::Id::new("accent"))).unwrap_or_default()
 }
 
 /// Switches the accent colour; takes effect next frame.
 pub fn set_accent(ctx: &egui::Context, a: Accent) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("accent"), a));
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::new("accent"), a);
+        d.remove_temp::<Accent>(egui::Id::new("accent-peek"));
+    });
+    visuals(ctx, skin(ctx));
+}
+
+/// Shows `a` everywhere without keeping it; None goes back to the kept one.
+pub fn peek_accent(ctx: &egui::Context, a: Option<Accent>) {
+    let id = egui::Id::new("accent-peek");
+    if ctx.data(|d| d.get_temp::<Accent>(id)) == a { return }
+    ctx.data_mut(|d| match a {
+        Some(a) => d.insert_temp(id, a),
+        None => { d.remove_temp::<Accent>(id); }
+    });
     visuals(ctx, skin(ctx));
 }
 
@@ -277,6 +413,7 @@ pub fn pal(ctx: &egui::Context) -> &'static Pal {
 
 /// Every skin × theme × accent palette, made once.
 pub fn pal_of(skin: Skin, theme: egui::Theme, a: Accent) -> &'static Pal {
+    if let Accent::Custom(c) = a { return custom_pal(skin, theme, c) }
     static ALL: std::sync::OnceLock<Vec<Pal>> = std::sync::OnceLock::new();
     let all = ALL.get_or_init(|| {
         let mut v = Vec::new();
@@ -295,12 +432,28 @@ pub fn pal_of(skin: Skin, theme: egui::Theme, a: Accent) -> &'static Pal {
     &all[(s * 2 + t) * Accent::ALL.len() + Accent::ALL.iter().position(|x| *x == a).unwrap_or(0)]
 }
 
-/// Big titles: VT323 / Archivo ExtraBold.
+/// A custom accent's palette for one skin and theme, made the first time it's asked for.
+/// ponytail: every colour tried stays in memory (~100 bytes each, a few hundred after dragging the hue bar about);
+/// evict old ones if that ever adds up.
+fn custom_pal(skin: Skin, theme: egui::Theme, c: [u8; 3]) -> &'static Pal {
+    type Made = std::collections::HashMap<(usize, bool, [u8; 3]), &'static Pal>;
+    static MADE: std::sync::OnceLock<std::sync::Mutex<Made>> = std::sync::OnceLock::new();
+    let light = theme == egui::Theme::Light;
+    let key = (Skin::ALL.iter().position(|x| *x == skin).unwrap_or(0), light, c);
+    let mut made = MADE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    made.entry(key).or_insert_with(|| {
+        let l = look_of(skin);
+        let base = if light { &l.light } else { &l.dark };
+        Box::leak(Box::new(tinted(base, readable(rgb(c[0], c[1], c[2]), base.panel, light).0)))
+    })
+}
+
+/// Big titles: VT323 / Archivo ExtraBold / Courier Prime Bold.
 pub fn title(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("title".into()))
 }
 
-/// Numbers, timecodes, small labels: VT323 / Archivo ExtraBold.
+/// Numbers, timecodes, small labels: VT323 / Archivo ExtraBold / Courier Prime Bold.
 pub fn num(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("num".into()))
 }
@@ -348,12 +501,15 @@ fn fonts(skin: Skin) -> egui::FontDefinitions {
         ("vt", include_bytes!("../assets/VT323-Regular.ttf")),
         ("archivo", include_bytes!("../assets/Archivo-Regular.ttf")),
         ("archivo-heavy", include_bytes!("../assets/Archivo-ExtraBold.ttf")),
+        ("courier", include_bytes!("../assets/CourierPrime-Regular.ttf")),
+        ("courier-bold", include_bytes!("../assets/CourierPrime-Bold.ttf")),
     ] {
         f.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
     }
     let (body, heading) = match skin {
         Skin::Wired => ("dot", "vt"),
         Skin::Swiss => ("archivo", "archivo-heavy"),
+        Skin::Ascii => ("courier", "courier-bold"),
     };
     let defaults = f.families[&FontFamily::Proportional].clone();
     // DotGothic16 covers kana; egui's defaults cover the rest (♥, ♫, arrows).
@@ -362,6 +518,97 @@ fn fonts(skin: Skin) -> egui::FontDefinitions {
     f.families.insert(FontFamily::Name("title".into()), chain(heading));
     f.families.insert(FontFamily::Name("num".into()), chain(heading));
     f
+}
+
+// ---------- characters (Ascii)
+
+/// Ascii's type: Courier Prime, bold for the loud parts.
+fn mono(size: f32, bold: bool) -> FontId {
+    if bold { title(size) } else { FontId::proportional(size) }
+}
+
+/// One character cell of `font`: its advance and line height.
+fn cell(painter: &egui::Painter, font: &FontId) -> Vec2 {
+    painter.layout_no_wrap("-".into(), font.clone(), Color32::PLACEHOLDER).size()
+}
+
+/// A box of characters around `rect`: `+--[ title ]--+` on top, `|` down the sides, `+---+` under. The title
+/// sits on `fill` in `ink`.
+fn char_box(painter: &egui::Painter, rect: Rect, title: Option<&str>, color: Color32, ink: Color32, fill: Color32) {
+    let font = mono(14.0, false);
+    let c = cell(painter, &font);
+    let n = ((rect.width() / c.x) as usize).saturating_sub(1);
+    let rule = format!("+{}", "-".repeat(n.saturating_sub(1)));
+    for y in [rect.top(), rect.bottom() - c.y] {
+        painter.text(pos2(rect.left(), y), egui::Align2::LEFT_TOP, &rule, font.clone(), color);
+        painter.text(pos2(rect.right(), y), egui::Align2::RIGHT_TOP, "+", font.clone(), color); // the exact edge
+    }
+    let mut y = rect.top() + c.y;
+    while y < rect.bottom() - c.y - 1.0 {
+        painter.text(pos2(rect.left(), y), egui::Align2::LEFT_TOP, "|", font.clone(), color);
+        painter.text(pos2(rect.right(), y), egui::Align2::RIGHT_TOP, "|", font.clone(), color);
+        y += c.y;
+    }
+    if let Some(t) = title {
+        let g = painter.layout_no_wrap(format!("[ {t} ]"), font, ink);
+        let at = pos2(rect.left() + c.x * 2.0, rect.top());
+        painter.rect_filled(Rect::from_min_size(at, g.size()), 0.0, fill);
+        painter.galley(at, g, ink);
+    }
+}
+
+/// `[####------]` across `width`: `frac` of it filled with `full`, the rest `-`.
+fn char_bar(painter: &egui::Painter, rect: Rect, frac: f32, full: char, lit: Color32, rest: Color32) {
+    let font = mono(15.0, true);
+    let n = ((rect.width() / cell(painter, &font).x) as usize).saturating_sub(2).max(1);
+    let k = ((frac.clamp(0.0, 1.0) * n as f32).round() as usize).min(n);
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |c| egui::TextFormat::simple(font.clone(), c);
+    job.append("[", 0.0, fmt(rest));
+    job.append(&full.to_string().repeat(k), 0.0, fmt(lit));
+    job.append(&"-".repeat(n - k), 0.0, fmt(rest));
+    job.append("]", 0.0, fmt(rest));
+    let g = painter.layout_job(job);
+    painter.galley(pos2(rect.left(), rect.center().y - g.size().y / 2.0), g, rest);
+}
+
+/// The character ramp covers are dithered to, light to dark.
+const RAMP: &[u8] = b" .:-=+*#%@";
+
+/// Ascii's cover art: two soft blobs over a gradient in ramp characters, `cols` × `rows`, seeded by `seed` so each
+/// list keeps its own.
+fn char_art(seed: &str, cols: usize, rows: usize) -> String {
+    let mut h = seed.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619)) | 1;
+    let mut rnd = || { h ^= h << 13; h ^= h >> 17; h ^= h << 5; (h % 1000) as f32 / 1000.0 };
+    let blobs: Vec<(f32, f32, f32)> = (0..2).map(|_| (rnd(), rnd(), 0.25 + rnd() * 0.3)).collect();
+    let line = |j: usize| -> String {
+        (0..cols).map(|i| {
+            let (u, v) = (i as f32 / cols as f32, j as f32 / rows as f32);
+            let mut val = 0.15 + 0.35 * v;
+            for (x, y, r) in &blobs { val += (1.0 - ((u - x).powi(2) + ((v - y) * 0.9).powi(2)).sqrt() / r).max(0.0) * 0.6 }
+            val += (((i * 7 + j * 13) % 5) as f32 - 2.0) * 0.03; // ordered noise, so flat areas still dither
+            RAMP[((val * 9.99).max(0.0) as usize).min(9)] as char
+        }).collect()
+    };
+    (0..rows).map(line).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn char_art_is_the_lists_own_and_only_ramp_characters() {
+    let (a, b) = (char_art("late night drive", 22, 12), char_art("gym 2026", 22, 12));
+    assert_eq!(a, char_art("late night drive", 22, 12)); // a list keeps its cover
+    assert_ne!(a, b);
+    assert_eq!(a.lines().count(), 12);
+    assert!(a.lines().all(|l| l.len() == 22) && a.bytes().all(|c| c == b'\n' || RAMP.contains(&c)));
+}
+
+/// Ascii's stand-in for every cover, filling `rect`.
+/// ponytail: never the real art (egui hands us textures, not pixels); dither the decoded image if that's wanted.
+fn char_cover(painter: &egui::Painter, rect: Rect, seed: &str, color: Color32) {
+    let font = mono((rect.width() / 18.0).clamp(7.0, 14.0), true);
+    let c = cell(painter, &font);
+    let art = char_art(seed, (rect.width() / c.x) as usize, (rect.height() / c.y) as usize);
+    painter.with_clip_rect(rect).text(rect.min, egui::Align2::LEFT_TOP, art, font, color);
 }
 
 // ---------- vector glyphs (Swiss)
@@ -424,13 +671,37 @@ fn dither(painter: &egui::Painter, rect: Rect, tone: Color32) {
 pub fn toast(ctx: &egui::Context, text: &str, error: bool, left: f32) -> Response {
     let (p, s, l) = (pal(ctx), skin(ctx), look(ctx));
     let flag = if error { p.accent } else { p.online };
+    if s == Skin::Ascii {
+        // A boxed line, `[OK]` or `[ERR]` first; the bottom rule drains as `=`.
+        return egui::Area::new(egui::Id::new("toast")).order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-(l.edge as f32 + 14.0), -(l.player_h + 14.0)))
+            .show(ctx, |ui| {
+                let rect = egui::Frame::new().fill(p.panel).inner_margin(egui::Margin { left: 18, right: 18, top: 20, bottom: 20 }).show(ui, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(if error { "[ERR]" } else { "[OK]" }).font(mono(15.0, true)).color(flag));
+                        ui.add(egui::Label::new(RichText::new(text).font(mono(15.0, false)).color(p.text)).truncate());
+                    });
+                }).response.rect;
+                let painter = ui.painter();
+                char_box(painter, rect, None, if error { p.accent } else { p.line }, p.text, p.panel);
+                let font = mono(14.0, false);
+                let c = cell(painter, &font);
+                let n = ((rect.width() / c.x) as usize).saturating_sub(2);
+                let drain = Rect::from_min_size(pos2(rect.left() + c.x, rect.bottom() - c.y), vec2(n as f32 * c.x, c.y));
+                painter.rect_filled(drain, 0.0, p.panel);
+                painter.text(drain.min, egui::Align2::LEFT_TOP, "=".repeat((n as f32 * left.clamp(0.0, 1.0)) as usize), font, flag);
+                ui.interact(rect, egui::Id::new("toast-click"), Sense::click())
+            })
+            .inner;
+    }
     egui::Area::new(egui::Id::new("toast"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-(l.edge as f32 + 14.0), -(l.player_h + 14.0)))
         .show(ctx, |ui| {
             let frame = match s {
                 Skin::Wired => egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0_f32, if error { p.accent } else { p.line })),
-                Skin::Swiss => egui::Frame::new().fill(p.surface).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 12 }),
+                Skin::Swiss | Skin::Ascii => egui::Frame::new().fill(p.surface).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 12 }),
             };
             let rect = frame.show(ui, |ui| {
                 ui.set_max_width(420.0);
@@ -443,7 +714,7 @@ pub fn toast(ctx: &egui::Context, text: &str, error: bool, left: f32) -> Respons
                         ui.add(egui::Label::new(RichText::new(text.to_uppercase()).font(num(19.0)).color(p.text)).truncate());
                         ui.add_space(2.0);
                     }
-                    Skin::Swiss => { ui.add(egui::Label::new(RichText::new(text).size(14.0).color(p.text)).truncate()); }
+                    Skin::Swiss | Skin::Ascii => { ui.add(egui::Label::new(RichText::new(text).size(14.0).color(p.text)).truncate()); }
                 });
             }).response.rect;
             let painter = ui.painter();
@@ -471,16 +742,25 @@ pub enum Win {
 pub fn window<R>(ui: &mut egui::Ui, win: Win, title_text: &str, tag: &str, dot: Option<Color32>, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let active = win == Win::Main;
+    if s == Skin::Ascii {
+        // Drawn around the contents afterwards, so the margin leaves a character's room on every side.
+        let r = egui::Frame::new().fill(p.panel).inner_margin(egui::Margin { left: 18, right: 18, top: 24, bottom: 20 }).show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            add(ui)
+        });
+        char_box(ui.painter(), r.response.rect, Some(title_text), p.line, if active { p.accent } else { p.dim }, p.panel);
+        return r.inner;
+    }
     let stroke = match s {
         Skin::Wired => Stroke::new(1.0_f32, if active { p.accent } else { p.line }),
-        Skin::Swiss => Stroke::NONE,
+        Skin::Swiss | Skin::Ascii => Stroke::NONE,
     };
     egui::Frame::new().fill(p.panel).stroke(stroke).show(ui, |ui| {
         ui.set_min_size(ui.available_size());
         let rect = ui.max_rect();
         match s {
             Skin::Swiss if win == Win::Player => { ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0_f32, p.text)); }
-            Skin::Swiss => {}
+            Skin::Swiss | Skin::Ascii => {}
             Skin::Wired => {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let (bar, ink) = if active { (p.accent, p.on_accent) } else { (p.surface, p.dim) };
@@ -517,22 +797,29 @@ pub fn text_field(ui: &mut egui::Ui, id: &str, wired: &str, swiss: &str, query: 
     let (margin, hint, font, fill, stroke) = match s {
         Skin::Wired => (egui::Margin::symmetric(8, 4), wired, num(20.0), p.surface, Stroke::new(1.0_f32, if focused { p.accent } else { p.line })),
         Skin::Swiss => (egui::Margin::symmetric(0, 6), swiss, FontId::proportional(14.0), Color32::TRANSPARENT, Stroke::NONE),
+        Skin::Ascii => (egui::Margin::symmetric(0, 6), wired, mono(15.0, false), Color32::TRANSPARENT, Stroke::NONE),
     };
     let r = egui::Frame::new().fill(fill).stroke(stroke).inner_margin(margin).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if s == Skin::Wired {
+            if s.blocky() {
                 // A fixed red ">" prompt; typing starts right after it.
-                ui.label(RichText::new(">").font(num(20.0)).color(p.accent));
+                ui.label(RichText::new(">").font(if s == Skin::Ascii { mono(15.0, true) } else { num(20.0) }).color(p.accent));
             }
             ui.add(egui::TextEdit::singleline(query).id(id).frame(false).hint_text(hint).font(font).margin(Vec2::ZERO).desired_width(f32::INFINITY))
         })
         .inner
     });
-    if s == Skin::Swiss {
+    let rect = r.response.rect;
+    match s {
         // Print-style field: just a rule under the text.
-        let rect = r.response.rect;
-        ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(2.0_f32, if focused { p.accent } else { p.text }));
+        Skin::Swiss => { ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(2.0_f32, if focused { p.accent } else { p.text })); }
+        Skin::Ascii => {
+            let font = mono(14.0, false);
+            let n = (rect.width() / cell(ui.painter(), &font).x) as usize;
+            ui.painter().text(rect.left_bottom(), egui::Align2::LEFT_CENTER, "-".repeat(n), font, if focused { p.accent } else { p.line });
+        }
+        Skin::Wired => {}
     }
     r.inner
 }
@@ -556,6 +843,19 @@ pub enum Stamp<'a> {
 pub fn cover(ui: &mut egui::Ui, url: Option<&str>, size: f32, stamp: Stamp, big: bool) -> Rect {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if s == Skin::Ascii {
+        // Character art, the list's own, with its tag lettered in the corner on the paper.
+        let tag = match stamp { Stamp::Liked => "<3", Stamp::Queue => "Q", Stamp::Search => "?", Stamp::New => "NR", Stamp::Text(t) => t, Stamp::None => "" };
+        let painter = ui.painter();
+        char_cover(painter, rect, url.unwrap_or(tag), if big { p.text } else { p.dim });
+        if !tag.is_empty() {
+            let g = painter.layout_no_wrap(format!("[{tag}]"), mono((size * 0.16).max(13.0), true), p.accent);
+            let at = Rect::from_min_size(rect.left_bottom() - vec2(0.0, g.size().y), g.size() + vec2(4.0, 0.0));
+            painter.rect_filled(at, 0.0, p.panel);
+            painter.galley(at.min + vec2(2.0, 0.0), g, p.accent);
+        }
+        return rect;
+    }
     if let Some(u) = url {
         let img = egui::Image::new(u);
         // A broken link or odd format falls through to the stand-in instead of egui's ⚠.
@@ -623,6 +923,7 @@ pub fn cover(ui: &mut egui::Ui, url: Option<&str>, size: f32, stamp: Stamp, big:
         }
         (Skin::Wired, Stamp::None) => dither(painter, rect, p.accent),
         (Skin::Swiss, Stamp::None) => { painter.rect_filled(rect, 0.0, p.surface); }
+        (Skin::Ascii, _) => {} // drawn above
     }
     rect
 }
@@ -644,7 +945,8 @@ fn queue_glyph(painter: &egui::Painter, c: Pos2, w: f32, color: Color32, pixel: 
 // ---------- rows
 
 /// Background of a track row, and the colours for its text.
-pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color32, Color32) {
+/// `band`: ASCII's tractor-feed band, on every other pair of rows (the caller counts them).
+pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool, band: bool) -> (Color32, Color32) {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let painter = ui.painter();
     match s {
@@ -661,10 +963,19 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color
             if hovered { painter.rect_filled(rect, 0.0, p.hover); }
             painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, p.line));
         }
+        Skin::Ascii => {
+            if band { painter.rect_filled(rect, 0.0, p.surface); }
+            if current { painter.rect_filled(rect, 0.0, p.selected); }
+            if hovered {
+                let (font, ink) = (mono(16.0, true), if current { p.on_selected } else { p.accent });
+                painter.text(rect.left_center() + vec2(2.0, 0.0), egui::Align2::LEFT_CENTER, "[", font.clone(), ink);
+                painter.text(rect.right_center() - vec2(2.0, 0.0), egui::Align2::RIGHT_CENTER, "]", font, ink);
+            }
+        }
     }
     match (s, current) {
         (Skin::Swiss, true) => (p.on_selected, p.on_selected),
-        (Skin::Wired, true) => (p.on_selected, p.on_selected.gamma_multiply(0.85)),
+        (Skin::Wired | Skin::Ascii, true) => (p.on_selected, p.on_selected.gamma_multiply(0.85)),
         _ => (p.text, p.dim),
     }
 }
@@ -678,7 +989,11 @@ pub fn heart_toggle(ui: &mut egui::Ui, rect: Rect, id: egui::Id, on: bool, show_
     let off = if current { p.on_selected.gamma_multiply(0.45) } else { p.dim.gamma_multiply(0.6) };
     let color = if on { Some(lit) } else if r.hovered() { Some(lit.gamma_multiply(0.75)) } else if show_off { Some(off) } else { None };
     if let Some(color) = color {
-        if s.blocky() { pixels(ui.painter(), rect.center(), HEART, 2.0, color) } else { heart(ui.painter(), rect.center(), 6.5, color) }
+        match s {
+            Skin::Wired => pixels(ui.painter(), rect.center(), HEART, 2.0, color),
+            Skin::Swiss => heart(ui.painter(), rect.center(), 6.5, color),
+            Skin::Ascii => { ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if on || r.hovered() { "<3" } else { "--" }, mono(15.0, true), color); }
+        }
     }
     r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on { "Remove from Liked Songs" } else { "Save to Liked Songs" })
 }
@@ -686,6 +1001,11 @@ pub fn heart_toggle(ui: &mut egui::Ui, rect: Rect, id: egui::Id, on: bool, show_
 /// The "now playing" mark in the number column, left-centred at `at`: three equaliser bars that bounce
 /// while `playing` (time `t`) and rest when paused.
 pub fn now_mark(painter: &egui::Painter, at: Pos2, color: Color32, s: Skin, playing: bool, t: f64) {
+    if s == Skin::Ascii {
+        // `>`, blinking while paused.
+        if playing || (t * 2.0) as i64 % 2 == 0 { painter.text(at, egui::Align2::LEFT_CENTER, ">", mono(18.0, true), color); }
+        return;
+    }
     for i in 0..3 {
         let h = if playing { 4.0 + 12.0 * ((t * 5.0 + i as f64 * 1.9).sin().abs() as f32) } else { [6.0, 10.0, 8.0][i] };
         let h = if s.blocky() { (h / 2.0).round() * 2.0 } else { h }; // pixel bars move in whole 2px steps
@@ -701,6 +1021,14 @@ pub fn ghost_row(ui: &mut egui::Ui, w: f32, cols: [f32; 4], scan: bool) {
     let [c_num, c_title, c_album, c_dur] = cols.map(|c| rect.left() + c);
     let painter = ui.painter();
     let y = rect.center().y;
+    if s == Skin::Ascii {
+        // `= = = =` where the text will be; the scan line is red.
+        let ink = if scan { p.accent } else { p.line };
+        for (x, n) in [(c_num, 2), (c_title, 10), (c_album, 7), (c_dur - 36.0, 3)] {
+            painter.text(pos2(x, y), egui::Align2::LEFT_CENTER, vec!["="; n].join(" "), mono(14.0, false), ink);
+        }
+        return;
+    }
     let bar = if scan { p.line } else { p.surface };
     if scan {
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, p.accent), StrokeKind::Inside);
@@ -715,7 +1043,7 @@ pub fn ghost_row(ui: &mut egui::Ui, w: f32, cols: [f32; 4], scan: bool) {
     block(c_dur - 36.0, -4.0, 36.0, 8.0);
     match s {
         Skin::Wired => painter.extend(Shape::dashed_line(&[rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, p.line), 1.0, 2.0)),
-        Skin::Swiss => { painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, p.line)); }
+        Skin::Swiss | Skin::Ascii => { painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, p.line)); }
     }
 }
 
@@ -736,6 +1064,8 @@ pub fn ctl_size(s: Skin, main: bool) -> Vec2 {
         (Skin::Wired, false) => vec2(44.0, 44.0),
         (Skin::Swiss, true) => vec2(70.0, 30.0),
         (Skin::Swiss, false) => vec2(56.0, 30.0),
+        (Skin::Ascii, true) => vec2(64.0, 34.0),
+        (Skin::Ascii, false) => vec2(52.0, 34.0),
     }
 }
 
@@ -765,6 +1095,14 @@ pub fn ctl_button(ui: &mut egui::Ui, ctl: Ctl) -> Response {
             let (font, ink) = if main { (title(16.0), p.accent) } else { (FontId::proportional(15.0), if hover { p.accent } else { p.text }) };
             painter.text(c, egui::Align2::CENTER_CENTER, text, font, ink);
         }
+        Skin::Ascii => {
+            let text = match ctl { Ctl::Prev => "[<<]", Ctl::Next => "[>>]", Ctl::Play => "[ > ]", Ctl::Pause => "[ || ]" };
+            let ink = if main {
+                painter.rect_filled(rect, 0.0, if hover { p.accent.gamma_multiply(0.85) } else { p.accent });
+                p.on_accent
+            } else if hover { p.accent } else { p.text };
+            painter.text(c, egui::Align2::CENTER_CENTER, text, mono(17.0, true), ink);
+        }
     }
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -773,7 +1111,7 @@ pub fn ctl_button(ui: &mut egui::Ui, ctl: Ctl) -> Response {
 /// Returns the response and where along it (0..=1) the pointer is while pressed.
 pub fn slider(ui: &mut egui::Ui, width: f32, frac: f32, volume: bool) -> (Response, Option<f32>) {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
-    let h = if s == Skin::Wired && !volume { 10.0 } else { 16.0 };
+    let h = if s == Skin::Wired && !volume { 10.0 } else if s == Skin::Ascii { 20.0 } else { 16.0 };
     let (rect, r) = ui.allocate_exact_size(vec2(width, h), Sense::click_and_drag());
     let frac = frac.clamp(0.0, 1.0);
     match s {
@@ -793,6 +1131,7 @@ pub fn slider(ui: &mut egui::Ui, width: f32, frac: f32, volume: bool) -> (Respon
             let fill = Rect::from_min_size(rail.min - vec2(0.0, 1.0), vec2(rail.width() * frac, 4.0));
             ui.painter().rect_filled(fill, 0.0, if volume { p.text } else { p.accent });
         }
+        Skin::Ascii => char_bar(ui.painter(), rect, frac, if volume { '=' } else { '#' }, if volume { p.text } else { p.accent }, p.dim),
     }
     let at = r.interact_pointer_pos().map(|q| ((q.x - rect.left()) / rect.width()).clamp(0.0, 1.0));
     (r.on_hover_cursor(egui::CursorIcon::PointingHand), at)
@@ -802,7 +1141,22 @@ pub fn slider(ui: &mut egui::Ui, width: f32, frac: f32, volume: bool) -> (Respon
 pub fn progress(ui: &mut egui::Ui, width: f32, done: usize, total: Option<usize>) {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let t = ui.input(|i| i.time);
-    if s.blocky() {
+    if s == Skin::Ascii {
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+        match total {
+            Some(tot) if tot > 0 => char_bar(ui.painter(), rect, done as f32 / tot as f32, '#', p.accent, p.dim),
+            _ => {
+                // Unknown total: three `#` walking along.
+                let font = mono(15.0, true);
+                let n = ((width / cell(ui.painter(), &font).x) as usize).saturating_sub(2).max(4);
+                let head = (t * 12.0) as usize % n;
+                let inner: String = (0..n).map(|i| if (i + n - head) % n < 3 { '#' } else { '-' }).collect();
+                ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, format!("[{inner}]"), font, p.accent);
+            }
+        }
+        return;
+    }
+    if s == Skin::Wired {
         let n = (width / 8.0) as usize;
         let (rect, _) = ui.allocate_exact_size(vec2(n as f32 * 8.0 - 2.0, 10.0), Sense::hover());
         let head = (t * 12.0) as usize % n.max(1);
@@ -832,6 +1186,21 @@ pub fn progress(ui: &mut egui::Ui, width: f32, done: usize, total: Option<usize>
 pub fn meter(ui: &mut egui::Ui, width: f32, height: f32, t: f64, playing: bool) {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    if s == Skin::Ascii {
+        // Columns of `|`, a `:` on top, in whole character steps.
+        let font = mono(13.0, true);
+        let c = cell(ui.painter(), &font);
+        let (cols, rows) = ((rect.width() / (c.x * 2.0)) as usize, (rect.height() / c.y).max(1.0) as usize);
+        let phase = if playing { t } else { 0.0 };
+        for i in 0..cols {
+            let x = i as f64;
+            let f = 0.18 + 0.8 * ((x * 0.55 + phase * 3.1).sin() * (x * 0.17 + phase * 1.7).cos()).abs();
+            let lit = ((f * rows as f64).round() as usize).clamp(1, rows);
+            let col: Vec<&str> = (0..rows).map(|r| if r < rows - lit { " " } else if r == rows - lit { ":" } else { "|" }).collect();
+            ui.painter().text(pos2(rect.left() + i as f32 * c.x * 2.0, rect.top()), egui::Align2::LEFT_TOP, col.join("\n"), font.clone(), p.accent.gamma_multiply(0.45 + 0.55 * f as f32));
+        }
+        return;
+    }
     let n = 32;
     let bw = (rect.width() - 3.0 * (n - 1) as f32) / n as f32;
     let phase = if playing { t } else { 0.0 };
@@ -851,9 +1220,11 @@ pub fn action_button(ui: &mut egui::Ui, text: &str, primary: bool) -> Response {
     let font = match s {
         Skin::Wired => num(20.0),
         Skin::Swiss => title(14.0),
+        Skin::Ascii => mono(15.0, true),
     };
+    let text = if s == Skin::Ascii { format!("[ {} ]", text.trim_start_matches("▶ ")) } else { text.to_string() };
     // PLACEHOLDER: the colour is picked below, per skin and state.
-    let g = ui.painter().layout_no_wrap(text.into(), font, Color32::PLACEHOLDER);
+    let g = ui.painter().layout_no_wrap(text, font, Color32::PLACEHOLDER);
     let (rect, r) = ui.allocate_exact_size(g.size() + vec2(28.0, 12.0), Sense::click());
     let hover = r.hovered();
     let painter = ui.painter();
@@ -862,10 +1233,11 @@ pub fn action_button(ui: &mut egui::Ui, text: &str, primary: bool) -> Response {
             painter.hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0_f32, if primary || hover { p.accent } else { p.text }));
             if primary { p.accent } else { p.text }
         }
-        Skin::Wired if primary => {
+        Skin::Wired | Skin::Ascii if primary => {
             painter.rect_filled(rect, 0.0, if hover { p.accent.gamma_multiply(0.85) } else { p.accent });
             p.on_accent
         }
+        Skin::Ascii => if hover { p.accent } else { p.text },
         Skin::Wired => {
             painter.rect(rect, 0.0, if hover { p.hover } else { p.surface }, Stroke::new(1.0_f32, p.line), StrokeKind::Inside);
             p.text
@@ -906,6 +1278,11 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, on: bool) -> Response {
                 painter.text(c + vec2(10.0, -9.0), egui::Align2::CENTER_CENTER, "1", num(11.0), p.on_accent);
             }
         }
+        Skin::Ascii => {
+            let text = match glyph { Glyph::Note => "[*]", Glyph::Menu => "[=]", Glyph::Shuffle => "[~]", Glyph::Repeat => "[o]", Glyph::RepeatOne => "[1]" };
+            let ink = if on { p.accent } else if hover { p.text } else { p.dim };
+            painter.text(c, egui::Align2::CENTER_CENTER, text, mono(16.0, true), ink);
+        }
         Skin::Swiss => {
             let ink = if on || hover { p.accent } else { p.dim };
             let st = Stroke::new(1.6_f32, ink);
@@ -940,9 +1317,77 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, on: bool) -> Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// One accent swatch in the skin menu: `color` filled in (None: the empty custom slot, a `+`), ringed when `kept`.
+/// ASCII: `##` in the colour, `[##]` when kept.
+pub fn swatch(ui: &mut egui::Ui, color: Option<Color32>, kept: bool) -> Response {
+    let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
+    let size = if s == Skin::Ascii { vec2(36.0, 24.0) } else { Vec2::splat(26.0) };
+    let (rect, r) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter();
+    if s == Skin::Ascii {
+        let text = match (color, kept) { (None, _) => " + ", (Some(_), true) => "[##]", (Some(_), false) => " ## " };
+        let ink = color.unwrap_or(if r.hovered() { p.text } else { p.dim });
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, mono(16.0, true), ink);
+        if r.hovered() && !kept { painter.text(rect.center_bottom(), egui::Align2::CENTER_CENTER, "--", mono(12.0, false), p.dim); }
+        return r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    match color {
+        Some(c) => { painter.rect_filled(rect, 0.0, c); }
+        None => {
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, if r.hovered() { p.text } else { p.dim }), StrokeKind::Inside);
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "+", FontId::proportional(18.0), if r.hovered() { p.text } else { p.dim });
+        }
+    }
+    if kept || (r.hovered() && color.is_some()) {
+        let ring = if kept { p.text } else { p.dim };
+        painter.rect_stroke(rect.expand(3.0), 0.0, Stroke::new(2.0_f32, ring), StrokeKind::Inside);
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The custom accent's hue bar: the rainbow is the track, the handle is the skin's (a block in Wired, a thin rule
+/// in Swiss). `hue` is 0..1; returns the new one while it's clicked or dragged.
+pub fn hue_bar(ui: &mut egui::Ui, width: f32, hue: f32) -> Option<f32> {
+    let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click_and_drag());
+    let track = Rect::from_center_size(rect.center(), vec2(width, if s == Skin::Swiss { 10.0 } else { 14.0 }));
+    let mut mesh = egui::Mesh::default();
+    let n = 36;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let c: Color32 = egui::ecolor::Hsva::new(t, 1.0, 1.0, 1.0).into();
+        let x = track.left() + track.width() * t;
+        mesh.colored_vertex(pos2(x, track.top()), c);
+        mesh.colored_vertex(pos2(x, track.bottom()), c);
+        if i > 0 {
+            let v = 2 * i as u32;
+            mesh.add_triangle(v - 2, v - 1, v);
+            mesh.add_triangle(v - 1, v, v + 1);
+        }
+    }
+    let painter = ui.painter();
+    painter.add(mesh);
+    let x = track.left() + track.width() * hue.clamp(0.0, 1.0);
+    match s {
+        Skin::Swiss => { painter.rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(3.0, 24.0)), 0.0, p.text); }
+        _ => {
+            let handle = Rect::from_center_size(pos2(x, rect.center().y), vec2(8.0, 24.0));
+            painter.rect_filled(handle, 0.0, p.panel);
+            painter.rect_filled(handle.shrink(2.0), 0.0, p.text);
+        }
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).interact_pointer_pos().map(|q| ((q.x - track.left()) / track.width()).clamp(0.0, 1.0))
+}
+
 /// Wired's block cursor after a big line of text.
 pub fn cursor_after(ui: &egui::Ui, text: Rect, height: f32) {
-    if !skin(ui.ctx()).blocky() { return }
+    let s = skin(ui.ctx());
+    if s == Skin::Swiss { return }
+    if s == Skin::Ascii {
+        let at = pos2(text.right() + 6.0, text.bottom() - 4.0);
+        if at.x + height * 0.5 < ui.max_rect().right() { ui.painter().text(at, egui::Align2::LEFT_BOTTOM, "_", mono(height * 0.9, true), pal(ui.ctx()).accent); }
+        return;
+    }
     let block = Rect::from_min_size(pos2(text.right() + 8.0, text.bottom() - height - 4.0), vec2(height * 0.4, height));
     if block.right() < ui.max_rect().right() {
         ui.painter().rect_filled(block, 0.0, pal(ui.ctx()).accent);

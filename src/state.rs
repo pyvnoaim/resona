@@ -169,6 +169,8 @@ pub struct State {
     pub base: Vec<api::Track>,
     /// How many tracks right after `qi` were added by hand ("Add to queue" / "Play next").
     pub queued: usize,
+    /// What the queue view was last built from (`sync_queue_view`).
+    queue_seen: Option<(usize, usize, usize, bool)>,
     /// The list the queue came from, for "jump to the playing song".
     pub queue_src: Option<Source>,
     /// Portrait and releases when an artist page is open.
@@ -194,6 +196,39 @@ impl State {
         self.added_to.retain(|p| p != playlist);
         self.added_to.insert(0, playlist.to_string());
         self.added_to.truncate(100);
+    }
+
+    /// Plays queue index `i` by skipping ahead to it (from the queue view or up next), using up hand-queued songs on
+    /// the way.
+    pub fn jump_to(&mut self, player: &Player, i: usize) {
+        self.queued = self.queued.saturating_sub(i.saturating_sub(self.qi));
+        self.dir = 1;
+        self.play_at(player, i);
+    }
+
+    /// The library lists the queue while it has hand-queued songs, or while it's open.
+    pub fn lists_queue(&self) -> bool {
+        self.queued > 0 || self.view == Some(Source::Queue)
+    }
+
+    /// The queue view's songs: the playing one, then what's next. Rebuilt only when the queue moved.
+    /// ponytail: a reorder that keeps the length, position and shuffle (none today) wouldn't show until the next move.
+    pub fn sync_queue_view(&mut self) {
+        if self.view != Some(Source::Queue) { return }
+        let now = (self.qi, self.queue.len(), self.queued, self.shuffle);
+        if self.queue_seen == Some(now) && !self.tracks.is_empty() { return }
+        self.queue_seen = Some(now);
+        self.tracks = self.queue.iter().skip(self.qi).cloned().collect();
+    }
+
+    /// The next `n` songs playback would actually reach, with their queue index: refused ones are skipped there,
+    /// so they're left out here too.
+    pub fn up_next(&self, n: usize) -> Vec<(usize, &api::Track)> {
+        (self.qi + 1..)
+            .zip(self.queue.iter().skip(self.qi + 1))
+            .filter(|(_, t)| !t.id.as_ref().is_some_and(|id| self.unplayable.contains(id)))
+            .take(n)
+            .collect()
     }
 
     /// The toast, while it lasts.
@@ -466,4 +501,26 @@ fn last_added_to_comes_first() {
     let mut s = State::default();
     for p in ["a", "b", "a", "c"] { s.remember_added_to(p) }
     assert_eq!(s.added_to, ["c", "a", "b"]);
+}
+
+#[test]
+fn up_next_skips_refused_songs_and_keeps_queue_indices() {
+    let queue = ["a", "b", "c", "d", "e"].iter().map(|id| api::Track { id: Some(id.to_string()), ..Default::default() }).collect();
+    let s = State { queue, qi: 1, unplayable: ["c".to_string()].into(), ..Default::default() };
+    let next: Vec<(usize, Option<&str>)> = s.up_next(5).into_iter().map(|(i, t)| (i, t.id.as_deref())).collect();
+    assert_eq!(next, [(3, Some("d")), (4, Some("e"))]);
+}
+
+#[test]
+fn queue_view_is_rebuilt_only_when_the_queue_moves() {
+    let t = |id: &str| api::Track { id: Some(id.into()), ..Default::default() };
+    let mut s = State { queue: vec![t("a"), t("b"), t("c")], view: Some(Source::Queue), ..Default::default() };
+    s.sync_queue_view();
+    assert_eq!(s.tracks.len(), 3);
+    s.tracks[0].name = "kept".into();
+    s.sync_queue_view(); // nothing moved: not copied again
+    assert_eq!(s.tracks[0].name, "kept");
+    s.qi = 1;
+    s.sync_queue_view();
+    assert_eq!(s.tracks.iter().map(|t| t.id.as_deref().unwrap()).collect::<Vec<_>>(), ["b", "c"]);
 }

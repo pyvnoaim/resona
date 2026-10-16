@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+#[cfg(target_os = "macos")]
 use crate::skin;
 use crate::{App, settings::*, state::*, ui::side_lists};
 
@@ -34,9 +35,9 @@ impl App {
                 &item("quieter", "Quieter (-)", None),
                 &item("mute", "Mute / Unmute (M)", None),
             ])?;
-            let skins = Submenu::with_items("Skin", true, &[&item("skin:Wired", "Wired", None), &item("skin:Swiss", "Swiss", None)])?;
+            let skins = Submenu::with_items("Skin", true, &[&item("skin:Wired", "Wired", None), &item("skin:Swiss", "Swiss", None), &item("skin:Ascii", "ASCII", None)])?;
             let themes = Submenu::with_items("Theme", true, &[&item("theme:System", "Follow macOS", None), &item("theme:Dark", "Dark", None), &item("theme:Light", "Light", None)])?;
-            let accent_items: Vec<_> = skin::Accent::ALL.iter().map(|a| item(&format!("accent:{a:?}"), &format!("{a:?}"), None)).collect();
+            let accent_items: Vec<_> = skin::Accent::ALL.iter().map(|a| item(&format!("accent:{}", a.key()), &a.key(), None)).collect();
             let accent_refs: Vec<&dyn muda::IsMenuItem> = accent_items.iter().map(|i| i as &dyn muda::IsMenuItem).collect();
             let accents = Submenu::with_items("Accent", true, &accent_refs)?;
             let view = Submenu::with_items("View", true, &[
@@ -86,8 +87,8 @@ impl App {
                 "back" => self.command(Cmd::SeekBy(-10_000)),
                 "shuffle" => self.toggle_shuffle(),
                 "repeat" => self.cycle_repeat(),
-                "louder" => self.set_volume((self.volume + 0.05).min(1.0)),
-                "quieter" => self.set_volume((self.volume - 0.05).max(0.0)),
+                "louder" => self.step_volume(0.05),
+                "quieter" => self.step_volume(-0.05),
                 "mute" => match self.muted.take() {
                     Some(v) => self.set_volume(v),
                     None => { self.muted = Some(self.volume); self.set_volume(0.0) }
@@ -105,7 +106,7 @@ impl App {
                 "queue" => self.queue_cursor(),
                 "help" => self.help = !self.help,
                 other => {
-                    if let Some(name) = other.strip_prefix("accent:") && let Some(a) = skin::Accent::ALL.into_iter().find(|a| format!("{a:?}") == name) {
+                    if let Some(name) = other.strip_prefix("accent:") && let Some(a) = skin::Accent::parse(name) {
                         skin::set_accent(ctx, a);
                         save_settings(ctx);
                     }
@@ -128,19 +129,10 @@ impl App {
         }
     }
 
-    /// Hooks into the system's media controls: macOS Now Playing (media keys, AirPods, Control Center), Linux MPRIS.
-    /// ponytail: not on Windows, where souvlaki needs the window's HWND (and panics without it); pass it from
-    /// eframe's CreationContext to get media keys there.
+    /// Hooks into the system's media controls (see `media_controls`); a key press wakes the window.
     pub fn attach_media(&mut self, ctx: &egui::Context) {
-        let config = souvlaki::PlatformConfig { display_name: "resona", dbus_name: "resona", hwnd: None };
-        let Ok(mut controls) = souvlaki::MediaControls::new(config) else { return };
-        let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
-        let attached = controls.attach(move |event| {
-            let _ = tx.send(event);
-            ctx.request_repaint();
-        });
-        if attached.is_ok() {
+        if let Some((controls, rx)) = media_controls(move || ctx.request_repaint()) {
             self.media = Some(controls);
             self.media_rx = rx;
         }
@@ -148,41 +140,17 @@ impl App {
 
     /// Media-key commands in; the playing song and its state out (only when something changed).
     pub fn sync_media(&mut self) {
-        use souvlaki::{MediaControlEvent as Ev, MediaMetadata, MediaPlayback, MediaPosition, SeekDirection};
-        let events: Vec<_> = self.media_rx.try_iter().collect();
-        for ev in events {
-            match ev {
-                Ev::Toggle => self.command(Cmd::Toggle),
-                Ev::Play => self.command(Cmd::Play),
-                Ev::Pause | Ev::Stop => self.command(Cmd::Pause),
-                Ev::Next => self.command(Cmd::Next),
-                Ev::Previous => self.command(Cmd::Prev),
-                Ev::SetPosition(MediaPosition(at)) => self.command(Cmd::SeekTo(at.as_millis() as u32)),
-                Ev::Seek(dir) | Ev::SeekBy(dir, _) => self.command(Cmd::SeekBy(if dir == SeekDirection::Forward { 10_000 } else { -10_000 })),
-                _ => {}
-            }
-        }
+        let cmds: Vec<_> = self.media_rx.try_iter().filter_map(media_cmd).collect();
+        for c in cmds { self.command(c) }
         let Some(controls) = self.media.as_mut() else { return };
-        let s = self.state.lock().unwrap();
-        let sent = (s.now.as_ref().and_then(|t| t.id.clone()), s.since.is_some(), s.pos_ms);
-        if sent == self.media_sent { return }
-        if sent.0 != self.media_sent.0 && let Some(t) = &s.now {
-            let artist = t.artist_line();
-            let _ = controls.set_metadata(MediaMetadata {
-                title: Some(&t.name),
-                artist: Some(&artist),
-                album: Some(&t.album.name),
-                cover_url: t.album.images.first().map(|i| i.url.as_str()),
-                duration: Some(Duration::from_millis(t.duration_ms as u64)),
-            });
-        }
-        let progress = Some(MediaPosition(Duration::from_millis(s.position() as u64)));
-        let _ = controls.set_playback(match (&s.now, s.since.is_some()) {
-            (None, _) => MediaPlayback::Stopped,
-            (_, true) => MediaPlayback::Playing { progress },
-            (_, false) => MediaPlayback::Paused { progress },
-        });
-        self.media_sent = sent;
+        media_show(controls, &self.state.lock().unwrap(), &mut self.media_sent);
+    }
+
+    /// + and -: whole 5% steps, saved. While muted they start from the volume before the mute, and unmute.
+    fn step_volume(&mut self, by: f32) {
+        let from = self.muted.take().unwrap_or(self.volume);
+        self.set_volume(((from + by) * 20.0).round() / 20.0);
+        set_setting("volume", &format!("{:.2}", self.volume));
     }
 
     /// Q: the song under the cursor goes to the end of the queue.
@@ -232,9 +200,8 @@ impl App {
         }
         if hit(Key::ArrowRight) { self.command(Cmd::SeekBy(10_000)) }
         if hit(Key::ArrowLeft) { self.command(Cmd::SeekBy(-10_000)) }
-        let step = |v: f32| (v * 20.0).round() / 20.0; // whole 5% steps
-        if hit(Key::Plus) || hit(Key::Equals) { self.set_volume(step(self.volume + 0.05)); set_setting("volume", &format!("{:.2}", self.volume)) }
-        if hit(Key::Minus) { self.set_volume(step(self.volume - 0.05)); set_setting("volume", &format!("{:.2}", self.volume)) }
+        if hit(Key::Plus) || hit(Key::Equals) { self.step_volume(0.05) }
+        if hit(Key::Minus) { self.step_volume(-0.05) }
         if hit(Key::M) {
             match self.muted.take() {
                 Some(v) => self.set_volume(v),
@@ -276,4 +243,62 @@ impl App {
             }
         }
     }
+}
+
+/// What the system was last told: the song, playing or not, and the position it was given.
+pub type MediaSent = (Option<String>, bool, u32);
+
+/// The system's media controls: macOS Now Playing (media keys, AirPods, Control Center), Linux MPRIS. `wake`
+/// runs on every event, which arrives on the returned channel.
+/// ponytail: not on Windows, where souvlaki needs the window's HWND (and panics without it); pass it from
+/// eframe's CreationContext to get media keys there (the CLI has no window at all).
+pub fn media_controls(wake: impl Fn() + Send + 'static) -> Option<(souvlaki::MediaControls, std::sync::mpsc::Receiver<souvlaki::MediaControlEvent>)> {
+    if cfg!(target_os = "windows") { return None } // souvlaki panics there without an HWND
+    let config = souvlaki::PlatformConfig { display_name: "resona", dbus_name: "resona", hwnd: None };
+    let mut controls = souvlaki::MediaControls::new(config).ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    controls.attach(move |event| {
+        let _ = tx.send(event);
+        wake();
+    }).ok()?;
+    Some((controls, rx))
+}
+
+/// A media key as a playback command.
+pub fn media_cmd(ev: souvlaki::MediaControlEvent) -> Option<Cmd> {
+    use souvlaki::{MediaControlEvent as Ev, MediaPosition, SeekDirection};
+    Some(match ev {
+        Ev::Toggle => Cmd::Toggle,
+        Ev::Play => Cmd::Play,
+        Ev::Pause | Ev::Stop => Cmd::Pause,
+        Ev::Next => Cmd::Next,
+        Ev::Previous => Cmd::Prev,
+        Ev::SetPosition(MediaPosition(at)) => Cmd::SeekTo(at.as_millis() as u32),
+        Ev::Seek(dir) | Ev::SeekBy(dir, _) => Cmd::SeekBy(if dir == SeekDirection::Forward { 10_000 } else { -10_000 }),
+        _ => return None,
+    })
+}
+
+/// Tells the system what's playing, only when that changed since `sent`.
+pub fn media_show(controls: &mut souvlaki::MediaControls, s: &State, sent: &mut MediaSent) {
+    use souvlaki::{MediaMetadata, MediaPlayback, MediaPosition};
+    let now = (s.now.as_ref().and_then(|t| t.id.clone()), s.since.is_some(), s.pos_ms);
+    if now == *sent { return }
+    if now.0 != sent.0 && let Some(t) = &s.now {
+        let artist = t.artist_line();
+        let _ = controls.set_metadata(MediaMetadata {
+            title: Some(&t.name),
+            artist: Some(&artist),
+            album: Some(&t.album.name),
+            cover_url: t.album.images.first().map(|i| i.url.as_str()),
+            duration: Some(Duration::from_millis(t.duration_ms as u64)),
+        });
+    }
+    let progress = Some(MediaPosition(Duration::from_millis(s.position() as u64)));
+    let _ = controls.set_playback(match (&s.now, s.since.is_some()) {
+        (None, _) => MediaPlayback::Stopped,
+        (_, true) => MediaPlayback::Playing { progress },
+        (_, false) => MediaPlayback::Paused { progress },
+    });
+    *sent = now;
 }

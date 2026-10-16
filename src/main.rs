@@ -63,7 +63,7 @@ struct App {
     /// macOS Now Playing / media keys, and what we last told it.
     media: Option<souvlaki::MediaControls>,
     media_rx: std::sync::mpsc::Receiver<souvlaki::MediaControlEvent>,
-    media_sent: (Option<String>, bool, u32),
+    media_sent: controls::MediaSent,
     /// First launch without a client ID: what's typed into the setup screen. Nothing connects until it's saved.
     setup: Option<String>,
     /// The accent the Dock icon was last drawn in.
@@ -115,7 +115,6 @@ impl App {
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
         app.state.lock().unwrap().added_to = setting("added_to").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
-        #[cfg(not(target_os = "windows"))] // souvlaki panics on Windows without the window's HWND
         app.attach_media(&cc.egui_ctx);
         match api::client_id(&resona_dir()) {
             Some(_) => app.start(&cc.egui_ctx),
@@ -149,31 +148,8 @@ impl App {
         if let Some(e) = self.engine.get() { e.mixer.set_volume((self.volume * u16::MAX as f32) as u16) }
     }
 
-    /// Starts fetching lyrics for the playing track, once per track. Spotify's lyrics service goes
-    /// through the librespot session (the Web API has none).
     fn fetch_lyrics(&self, s: &mut State) {
-        let (Some(e), Some(id)) = (self.engine.get(), s.now.as_ref().and_then(|t| t.id.clone())) else { return };
-        if s.lyrics.as_ref().is_some_and(|(have, _)| *have == id) { return }
-        s.lyrics = Some((id.clone(), Lyrics::Loading));
-        let (state, session) = (self.state.clone(), e.session());
-        self.rt.spawn(async move {
-            let got = match SpotifyId::from_base62(track_id(&id)) {
-                Ok(sid) => librespot::metadata::Lyrics::get(&session, &sid).await.ok(),
-                Err(_) => None,
-            };
-            let lyrics = match got {
-                Some(l) => {
-                    let synced = !matches!(l.lyrics.sync_type, librespot::metadata::lyrics::SyncType::Unsynced);
-                    let lines = l.lyrics.lines.into_iter().map(|line| (line.start_time_ms.parse().unwrap_or(0), line.words)).collect();
-                    Lyrics::Lines { synced, lines }
-                }
-                None => Lyrics::Missing, // most often: Spotify has no lyrics for this song
-            };
-            let mut s = state.lock().unwrap();
-            if s.lyrics.as_ref().is_some_and(|(have, _)| *have == id) {
-                s.lyrics = Some((id, lyrics));
-            }
-        });
+        if let Some(e) = self.engine.get() { fetch_lyrics(self.rt.handle(), e, &self.state, s) }
     }
 
     /// Draws the toast until it runs out: hovering holds it, a click closes it.
@@ -189,63 +165,16 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(250)); // drains the bar, then clears it
     }
 
-    /// Appends a track to one of your playlists, then says so in a toast.
     fn add_to(&self, playlist: String, name: String, track: String, ctx: &egui::Context) {
-        let Some(e) = self.engine.get() else { return };
-        let (state, web, http, ctx) = (self.state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
-        self.rt.spawn(async move {
-            let done = api::add_to_playlist(&web, &http, &playlist, &track).await;
-            let mut s = state.lock().unwrap();
-            let order = match done {
-                Ok(()) => {
-                    s.remember_added_to(&playlist);
-                    s.members.entry(playlist).or_default().insert(track);
-                    s.say(format!("Added to {name}"), false);
-                    Some(s.added_to.join(","))
-                }
-                Err(err) => { s.say(format!("Not added to {name}: {err}"), true); None }
-            };
-            drop(s); // no disk writes under the lock the frame needs
-            if let Some(order) = order { set_setting("added_to", &order) }
-            ctx.request_repaint(); // nothing else redraws an idle window
-        });
+        if let Some(e) = self.engine.get() { add_to(self.rt.handle(), e, &self.state, playlist, name, track, ctx) }
     }
 
-    /// Makes a playlist, puts it on top of the sidebar, and adds `track` to it if one came along.
     pub(crate) fn new_playlist(&self, name: String, track: Option<String>, ctx: &egui::Context) {
-        let Some(e) = self.engine.get() else { return };
-        let (state, web, http, ctx) = (self.state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
-        self.rt.spawn(async move {
-            let made = api::create_playlist(&web, &http, &name).await;
-            let added = match (&made, &track) {
-                (Ok(pl), Some(t)) => api::add_to_playlist(&web, &http, &pl.id, t).await,
-                _ => Ok(()),
-            };
-            let mut s = state.lock().unwrap();
-            let order = match made {
-                Ok(pl) => {
-                    s.members.entry(pl.id.clone()).or_default().extend(track.filter(|_| added.is_ok()));
-                    s.remember_added_to(&pl.id);
-                    s.playlists.insert(0, pl);
-                    match added {
-                        Ok(()) => s.say(format!("Created {name}"), false),
-                        Err(err) => s.say(format!("Created {name}, but the song wasn't added: {err}"), true),
-                    }
-                    Some(s.added_to.join(","))
-                }
-                Err(err) => { s.say(format!("Couldn't create {name}: {err}"), true); None }
-            };
-            drop(s); // no disk writes under the lock the frame needs
-            if let Some(order) = order { set_setting("added_to", &order) }
-            ctx.request_repaint(); // nothing else redraws an idle window
-        });
+        if let Some(e) = self.engine.get() { new_playlist(self.rt.handle(), e, &self.state, name, track, ctx) }
     }
 
-    /// Starts reading what's in your own playlists, once, for the ticks in "Add to playlist".
     fn load_members(&self) {
-        let Some(e) = self.engine.get() else { return };
-        if std::mem::replace(&mut self.state.lock().unwrap().members_asked, true) { return }
-        self.rt.spawn(load_members(self.state.clone(), e.web.clone(), e.http.clone(), e.session().username()));
+        if let Some(e) = self.engine.get() { ask_members(self.rt.handle(), e, &self.state) }
     }
 
     fn toggle_like(&self, id: String) {
@@ -290,6 +219,89 @@ impl App {
         if let Some(src) = src { self.open(src, ctx) }
         self.jump = id;
     }
+}
+
+/// Starts fetching lyrics for the playing track, once per track. Spotify's lyrics service goes
+/// through the librespot session (the Web API has none).
+pub fn fetch_lyrics(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, s: &mut State) {
+    let Some(id) = s.now.as_ref().and_then(|t| t.id.clone()) else { return };
+    if s.lyrics.as_ref().is_some_and(|(have, _)| *have == id) { return }
+    s.lyrics = Some((id.clone(), Lyrics::Loading));
+    let (state, session) = (state.clone(), e.session());
+    rt.spawn(async move {
+        let got = match SpotifyId::from_base62(track_id(&id)) {
+            Ok(sid) => librespot::metadata::Lyrics::get(&session, &sid).await.ok(),
+            Err(_) => None,
+        };
+        let lyrics = match got {
+            Some(l) => {
+                let synced = !matches!(l.lyrics.sync_type, librespot::metadata::lyrics::SyncType::Unsynced);
+                let lines = l.lyrics.lines.into_iter().map(|line| (line.start_time_ms.parse().unwrap_or(0), line.words)).collect();
+                Lyrics::Lines { synced, lines }
+            }
+            None => Lyrics::Missing, // most often: Spotify has no lyrics for this song
+        };
+        let mut s = state.lock().unwrap();
+        if s.lyrics.as_ref().is_some_and(|(have, _)| *have == id) {
+            s.lyrics = Some((id, lyrics));
+        }
+    });
+}
+
+/// Appends a track to one of your playlists, then says so in a toast.
+pub fn add_to(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, playlist: String, name: String, track: String, ctx: &egui::Context) {
+    let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
+    rt.spawn(async move {
+        let done = api::add_to_playlist(&web, &http, &playlist, &track).await;
+        let mut s = state.lock().unwrap();
+        let order = match done {
+            Ok(()) => {
+                s.remember_added_to(&playlist);
+                s.members.entry(playlist).or_default().insert(track);
+                s.say(format!("Added to {name}"), false);
+                Some(s.added_to.join(","))
+            }
+            Err(err) => { s.say(format!("Not added to {name}: {err}"), true); None }
+        };
+        drop(s); // no disk writes under the lock the frame needs
+        if let Some(order) = order { set_setting("added_to", &order) }
+        ctx.request_repaint(); // nothing else redraws an idle window
+    });
+}
+
+/// Makes a playlist, puts it on top of the sidebar, and adds `track` to it if one came along.
+pub fn new_playlist(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, name: String, track: Option<String>, ctx: &egui::Context) {
+    let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
+    rt.spawn(async move {
+        let made = api::create_playlist(&web, &http, &name).await;
+        let added = match (&made, &track) {
+            (Ok(pl), Some(t)) => api::add_to_playlist(&web, &http, &pl.id, t).await,
+            _ => Ok(()),
+        };
+        let mut s = state.lock().unwrap();
+        let order = match made {
+            Ok(pl) => {
+                s.members.entry(pl.id.clone()).or_default().extend(track.filter(|_| added.is_ok()));
+                s.remember_added_to(&pl.id);
+                s.playlists.insert(0, pl);
+                match added {
+                    Ok(()) => s.say(format!("Created {name}"), false),
+                    Err(err) => s.say(format!("Created {name}, but the song wasn't added: {err}"), true),
+                }
+                Some(s.added_to.join(","))
+            }
+            Err(err) => { s.say(format!("Couldn't create {name}: {err}"), true); None }
+        };
+        drop(s); // no disk writes under the lock the frame needs
+        if let Some(order) = order { set_setting("added_to", &order) }
+        ctx.request_repaint(); // nothing else redraws an idle window
+    });
+}
+
+/// Starts reading what's in your own playlists, once, for the ticks in "Add to playlist".
+pub fn ask_members(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared) {
+    if std::mem::replace(&mut state.lock().unwrap().members_asked, true) { return }
+    rt.spawn(load_members(state.clone(), e.web.clone(), e.http.clone(), e.session().username()));
 }
 
 /// Switches the main view and streams that list in, page by page.
@@ -551,9 +563,9 @@ impl eframe::App for App {
         self.menu_events(ctx);
         self.keys(ctx);
         self.window_title(ctx);
-        if self.icon_accent != Some(skin::accent(ctx)) {
-            self.icon_accent = Some(skin::accent(ctx));
-            set_app_icon(ctx, icon_ink(skin::accent(ctx)));
+        if self.icon_accent != Some(skin::kept_accent(ctx)) { // not on a preview: a 1024 px redraw each time
+            self.icon_accent = Some(skin::kept_accent(ctx));
+            set_app_icon(ctx, icon_ink(skin::kept_accent(ctx)));
         }
         self.bars_shown.set(false);
         if let Some(typed) = &mut self.setup {

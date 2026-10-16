@@ -3,10 +3,11 @@
 *Latin: resound!* A small native Spotify player for macOS, written in Rust with
 [egui](https://github.com/emilk/egui) and [librespot](https://github.com/librespot-org/librespot).
 
-Two skins, each with a dark and a light theme:
+Three skins, each with a dark and a light theme:
 
 - **Wired**: cyber/pixel, black and red, in the spirit of *Serial Experiments Lain*. The default.
 - **Swiss**: print grid, huge type, one red rule.
+- **ASCII**: a teletype printout. Every frame, bar, heart and cover is drawn in plain characters, in Courier.
 
 ## Features
 
@@ -18,7 +19,8 @@ Two skins, each with a dark and a light theme:
 - Like and unlike songs, add songs to playlists or a new one (right-click, also on the playing song)
 - Big cover view with synced lyrics; artist and album names open their pages
 - Media keys, Now Playing, and a native menu bar with shortcuts (press `?` in the app for the full list)
-- Six accent colours (menu or ⌘,), also for the terminal version and the app icon
+- Six accent colours or your own hex colour (menu or ⌘,): hover a swatch to try it on the whole app, click to
+  keep it. Your own colour is shaded per theme so it stays readable. The terminal version and the app icon follow it
 - Remembers skin, theme, accent, volume and the last open list
 
 ## Requirements
@@ -76,7 +78,10 @@ Click a list on the left, then a song to play it. Right-click a song for the que
 playlists and song radio. Press `?` for every shortcut. Media keys and Control Center's Now Playing work too.
 
 `resona cli` runs the same player full-screen in the terminal: arrows to move, tab to switch between your lists
-and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit.
+and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit. It does most of
+what the window does: `a` / `A` queue a song or play it next, `p` adds it to a playlist, `v` shows the lyrics,
+`i` starts a song radio, `g` / `G` open the artist / album, `c` copies the link, `m` mutes, and the queue shows in
+the library while it has songs. Media keys and Now Playing work there too. Press `?` for every key.
 
 ## Files and signing in again
 
@@ -115,7 +120,7 @@ same as on the Mac.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The bundled fonts (DotGothic16, VT323, Archivo) are under the SIL Open Font
-License; their licenses are in `assets/`.
+MIT, see [LICENSE](LICENSE). The bundled fonts (DotGothic16, VT323, Archivo, Courier Prime) are under the SIL
+Open Font License; their licenses are in `assets/`.
 
 Resona is not affiliated with Spotify.

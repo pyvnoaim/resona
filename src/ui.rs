@@ -40,6 +40,7 @@ pub fn small(s: Skin) -> FontId {
     match s {
         Skin::Wired => skin::num(20.0),
         Skin::Swiss => FontId::proportional(13.0),
+        Skin::Ascii => FontId::proportional(14.0),
     }
 }
 
@@ -107,10 +108,10 @@ pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, play: b
 }
 
 /// The pages a song's names lead to.
-fn artist_of(t: &api::Track) -> Option<Source> {
+pub fn artist_of(t: &api::Track) -> Option<Source> {
     t.artists.iter().find_map(|a| Some(Source::Artist { id: a.id.clone()?, name: a.name.clone() }))
 }
-fn album_of(t: &api::Track) -> Option<Source> {
+pub fn album_of(t: &api::Track) -> Option<Source> {
     t.album.id.clone().map(|id| Source::Album { id, name: t.album.name.clone() })
 }
 
@@ -122,7 +123,7 @@ fn link(ui: &egui::Ui, at: Rect, id: egui::Id, color: egui::Color32) -> egui::Re
 }
 
 /// Playlists a track can be added to: yours and the collaborative ones, the ones you last added to first.
-fn own_lists(s: &State, me: &str) -> Vec<(String, String)> {
+pub fn own_lists(s: &State, me: &str) -> Vec<(String, String)> {
     let mut own: Vec<_> = s.playlists.iter().filter(|pl| pl.web_readable(me)).map(|pl| (pl.id.clone(), pl.name.clone())).collect();
     own.sort_by_key(|(id, _)| s.added_to.iter().position(|p| p == id).unwrap_or(usize::MAX)); // stable: the rest keep sidebar order
     own
@@ -161,8 +162,8 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
     }
 
     // Corners: the way back, and where we are.
-    let hint = skin::num(if sk.blocky() { 20.0 } else { 13.0 });
-    let back = if caps { "[ ESC ] ◀ LIBRARY" } else { "◀ Library" };
+    let hint = skin::num(if sk == Skin::Wired { 20.0 } else { 13.0 }); // VT323 runs small
+    let back = match sk { Skin::Wired => "[ ESC ] ◀ LIBRARY", Skin::Ascii => "[ ESC ] < LIBRARY", Skin::Swiss => "◀ Library" };
     let back_rect = Rect::from_min_size(full.min + vec2(22.0, 16.0), vec2(220.0, 24.0));
     let r = ui.interact(back_rect, egui::Id::new("focus-back"), Sense::click());
     ui.painter().text(back_rect.left_center(), egui::Align2::LEFT_CENTER, back, hint.clone(), if r.hovered() { p.accent } else { p.dim });
@@ -212,7 +213,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         ui.add_space(10.0);
         let (big, now_ink) = match sk {
             Skin::Wired => (skin::num(40.0), p.accent),
-            Skin::Swiss => (skin::title(30.0), p.accent),
+            Skin::Swiss | Skin::Ascii => (skin::title(30.0), p.accent),
         };
         let small_line = FontId::new(big.size * 0.6, big.family.clone());
         let pos = s.position();
@@ -279,7 +280,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
             Some(Lyrics::Loading) => { ui.label(RichText::new(if caps { "LOADING LYRICS…" } else { "Loading lyrics…" }).font(small(sk)).color(p.dim)); }
             Some(Lyrics::Missing) | None => {
                 skin::meter(ui, (full.width() * 0.5).min(560.0), 64.0, ui.input(|i| i.time), s.since.is_some());
-                let label = match sk { Skin::Wired => "NO LYRICS · 歌詞なし · UP NEXT >", Skin::Swiss => "No lyrics · Up next" };
+                let label = match sk { Skin::Wired => "NO LYRICS · 歌詞なし · UP NEXT >", Skin::Swiss => "No lyrics · Up next", Skin::Ascii => "NO LYRICS - UP NEXT >" };
                 ui.label(RichText::new(label).font(small(sk)).color(p.dim));
                 out.play = up_next(ui, s, pos, centred);
             }
@@ -312,12 +313,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
 pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32, centred: bool) -> Option<usize> {
     let p = skin::pal(ui.ctx());
     let left = s.now.as_ref().map_or(0, |t| t.duration_ms.saturating_sub(pos));
-    // The songs playback would actually reach: refused ones are skipped there, so they're left out here too.
-    let cards: Vec<(usize, &api::Track)> = (s.qi + 1..)
-        .zip(s.queue.iter().skip(s.qi + 1))
-        .filter(|(_, t)| !t.id.as_ref().is_some_and(|id| s.unplayable.contains(id)))
-        .take(3)
-        .collect();
+    let cards = s.up_next(3);
     let (w, gap) = (230.0, 12.0);
     let fit = (((ui.available_width() + gap) / (w + gap)) as usize).max(1);
     let cards = &cards[..cards.len().min(fit)];
@@ -348,7 +344,7 @@ pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32, centred: bool) -> Option<
                 ui.painter().layout_job(job)
             };
             let when = if first { format!("IN {}", mmss(left, true)) } else { "THEN".to_string() };
-            let small_font = skin::num(if sk.blocky() { 17.0 } else { 12.0 }); // VT323 runs small
+            let small_font = skin::num(if sk == Skin::Wired { 17.0 } else { 12.0 }); // VT323 runs small
             let rows = [line(when, small_font, dim), line(t.name.clone(), FontId::proportional(13.0), ink), line(t.artist_line(), FontId::proportional(11.0), dim)];
             let mut y = rect.center().y - rows.iter().map(|g| g.size().y).sum::<f32>() / 2.0;
             for (g, color) in rows.into_iter().zip([dim, ink, dim]) {
@@ -387,7 +383,7 @@ pub fn help_overlay(ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("help")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
         let stroke = Stroke::new(1.0_f32, if sk == Skin::Wired { p.accent } else { p.line });
         egui::Frame::new().fill(p.panel).stroke(stroke).inner_margin(egui::Margin::same(22)).show(ui, |ui| {
-            ui.label(RichText::new(if sk.blocky() { "KEYS // キー" } else { "Keyboard shortcuts" }).font(small(sk)).color(p.dim));
+            ui.label(RichText::new(match sk { Skin::Wired => "KEYS // キー", Skin::Ascii => "KEYS", Skin::Swiss => "Keyboard shortcuts" }).font(small(sk)).color(p.dim));
             ui.add_space(8.0);
             egui::Grid::new("keys").num_columns(2).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
                 for (group, keys) in groups {
@@ -414,7 +410,8 @@ pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
     // ⌘, asks for the menu through a flag, since the shortcut isn't a click on this button.
     let asked = ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("open-menu"))).unwrap_or(false);
     if asked { egui::Popup::toggle_id(ctx, egui::Popup::default_response_id(&r)) }
-    egui::Popup::menu(&r).align(egui::RectAlign::TOP_END).show(|ui| {
+    // Clicks inside keep it open: trying swatches and typing a hex shouldn't close it.
+    let shown = egui::Popup::menu(&r).align(egui::RectAlign::TOP_END).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         let p = skin::pal(ui.ctx());
         let head = |ui: &mut egui::Ui, text: &str| { ui.label(RichText::new(text).size(11.0).color(p.dim)); };
         head(ui, "Skin");
@@ -427,17 +424,7 @@ pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
         }
         ui.separator();
         head(ui, "Accent");
-        let now = skin::accent(ctx);
-        for a in skin::Accent::ALL {
-            ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                ui.painter().rect_filled(dot, 0.0, skin::pal_of(current, ctx.theme(), a).accent);
-                if ui.selectable_label(a == now, format!("{a:?}")).clicked() {
-                    skin::set_accent(ctx, a);
-                    save_settings(ctx);
-                }
-            });
-        }
+        accents(ui, ctx);
         ui.separator();
         head(ui, "Theme");
         let theme = ctx.options(|o| o.theme_preference);
@@ -448,6 +435,86 @@ pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         }
     });
+    if shown.is_none() {
+        // Closed (Esc, a click outside): whatever was being tried goes, the custom panel too.
+        skin::peek_accent(ctx, None);
+        ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("custom-open")));
+    }
+}
+
+/// The accent swatches: hovering one shows it everywhere, a click keeps it. The last is your own colour, which
+/// opens a hex field (and a hue bar, except in ASCII).
+fn accents(ui: &mut egui::Ui, ctx: &egui::Context) {
+    use skin::Accent;
+    let (p, sk, theme) = (skin::pal(ctx), skin::skin(ctx), ctx.theme());
+    let kept = skin::kept_accent(ctx);
+    let (open_id, draft_id) = (egui::Id::new("custom-open"), egui::Id::new("custom-draft"));
+    let mut open = ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let mut draft: String = ctx.data(|d| d.get_temp(draft_id)).unwrap_or_else(|| "#ff8800".into());
+    let mut tried = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for a in Accent::ALL {
+            let r = skin::swatch(ui, Some(skin::pal_of(sk, theme, a).accent), a == kept).on_hover_text(a.key());
+            if r.hovered() { tried = Some(a) }
+            if r.clicked() {
+                skin::set_accent(ctx, a);
+                save_settings(ctx);
+                open = false;
+            }
+        }
+        let custom = matches!(kept, Accent::Custom(_)).then_some(kept);
+        let r = skin::swatch(ui, custom.map(|a| skin::pal_of(sk, theme, a).accent), custom.is_some()).on_hover_text("Your own colour");
+        if r.hovered() && custom.is_some() { tried = custom }
+        if r.clicked() {
+            open = !open;
+            if let Some(a) = custom { draft = a.key() }
+        }
+    });
+    let typed = skin::hex(&draft);
+    if open {
+        ui.add_space(4.0);
+        let r = skin::text_field(ui, "custom-hex", "#ff8800_", "#ff8800", &mut draft);
+        if sk != skin::Skin::Ascii {
+            let c = typed.map_or(egui::Color32::from_rgb(255, 136, 0), |[r, g, b]| egui::Color32::from_rgb(r, g, b));
+            if let Some(h) = skin::hue_bar(ui, 240.0, egui::ecolor::Hsva::from(c).h) {
+                let c: egui::Color32 = egui::ecolor::Hsva::new(h, 1.0, 1.0, 1.0).into();
+                draft = Accent::Custom([c.r(), c.g(), c.b()]).key();
+            }
+        }
+        let typed = skin::hex(&draft);
+        let note = match typed {
+            None => "Six hex digits, like #ff8800.".to_string(),
+            Some([r, g, b]) => match skin::readable(egui::Color32::from_rgb(r, g, b), p.panel, theme == egui::Theme::Light) {
+                (_, 0) => "Readable on this theme as it is.".to_string(),
+                (shade, k) => format!("Shown as {} here: {} {k}% to stay readable.", Accent::Custom([shade.r(), shade.g(), shade.b()]).key(), if theme == egui::Theme::Light { "darkened" } else { "lightened" }),
+            },
+        };
+        ui.label(RichText::new(note).size(12.0).color(p.dim));
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let (keep, cancel) = ui.horizontal(|ui| {
+            let keep = skin::action_button(ui, if sk.blocky() { "KEEP" } else { "Keep" }, true).clicked();
+            (keep, skin::action_button(ui, if sk.blocky() { "CANCEL" } else { "Cancel" }, false).clicked())
+        }).inner;
+        if let (true, Some(c)) = (keep || enter, typed) {
+            skin::set_accent(ctx, Accent::Custom(c));
+            save_settings(ctx);
+            open = false;
+        } else if cancel {
+            open = false;
+        } else {
+            tried = typed.map(Accent::Custom); // the panel previews what's typed
+        }
+    }
+    // What the swatches are showing: the one under the pointer, or the kept one.
+    let shown = tried.unwrap_or(kept);
+    let detail = match shown {
+        Accent::Custom(_) => shown.key(),
+        a => format!("{}{}", a.key(), if tried.is_some() && a != kept { " (preview)" } else { "" }),
+    };
+    ui.label(RichText::new(if sk.blocky() { detail.to_uppercase() } else { detail }).size(12.0).color(p.dim));
+    skin::peek_accent(ctx, tried.filter(|a| *a != kept));
+    ctx.data_mut(|d| { d.insert_temp(open_id, open); d.insert_temp(draft_id, draft); });
 }
 
 /// First launch: how to make your own Spotify app, and a field for its client ID. True when Save is pressed
@@ -455,7 +522,7 @@ pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
 pub fn setup(ui: &mut egui::Ui, typed: &mut String, redirect: &str, error: Option<&str>) -> bool {
     let (p, s) = (skin::pal(ui.ctx()), skin::skin(ui.ctx()));
     let caps = s.blocky();
-    let size = match s { Skin::Wired => 52.0, Skin::Swiss => 44.0 };
+    let size = match s { Skin::Wired => 52.0, Skin::Swiss | Skin::Ascii => 44.0 };
     let mut save = false;
     ui.add_space((ui.available_height() / 2.0 - 220.0).max(24.0));
     ui.horizontal(|ui| {
@@ -523,6 +590,7 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
         let (brand, size) = match s {
             Skin::Wired => (skin::num(22.0), 52.0),
             Skin::Swiss => (skin::num(14.0), 44.0),
+            Skin::Ascii => (skin::num(15.0), 44.0),
         };
         ui.label(RichText::new("resona").font(brand).color(p.dim));
         let r = ui.add(egui::Label::new(RichText::new(msg).font(skin::title(size)).color(if error.is_some() { p.accent } else { p.text })).wrap());
@@ -556,7 +624,7 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
 
 /// The sidebar's rows, top to bottom. Queue only shows up while you've queued songs by hand (or are looking at it).
 pub fn side_lists(s: &State) -> Vec<Source> {
-    let queue = (s.queued > 0 || s.view == Some(Source::Queue)).then_some(Source::Queue);
+    let queue = s.lists_queue().then_some(Source::Queue);
     [Source::Liked, Source::NewReleases].into_iter().chain(queue).chain(s.playlists.iter().map(|p| Source::Playlist(p.id.clone()))).collect()
 }
 
@@ -576,6 +644,7 @@ impl App {
             let margin = match sk {
                 Skin::Wired => egui::Margin::same(8),
                 Skin::Swiss => egui::Margin { left: 30, right: 16, top: 30, bottom: 8 },
+                Skin::Ascii => egui::Margin::same(2), // the frame already leaves room
             };
             egui::Frame::new().inner_margin(margin).show(ui, |ui| {
                 if sk == Skin::Swiss {
@@ -631,7 +700,15 @@ impl App {
                                     let font = if selected { skin::title(14.0) } else { FontId::proportional(14.0) };
                                     child.add(egui::Label::new(RichText::new(name).font(font).color(ink)).truncate());
                                 }
-                                _ => {
+                                Skin::Ascii => {
+                                    // "[LS] Liked Songs": a tag, then the name; `>` marks the open one.
+                                    let tag = match &src { Source::Liked => "LS".to_string(), Source::NewReleases => "NR".into(), Source::Queue => "Q".into(), _ => initials(name) };
+                                    let ink = if selected || on { p.accent } else { p.text };
+                                    child.add_sized(vec2(14.0, 20.0), egui::Label::new(RichText::new(if selected { ">" } else { " " }).font(skin::num(15.0)).color(p.accent)));
+                                    child.add_sized(vec2(44.0, 20.0), egui::Label::new(RichText::new(format!("[{tag}]")).font(skin::num(14.0)).color(if selected { p.accent } else { p.dim })));
+                                    child.add(egui::Label::new(RichText::new(name).size(15.0).color(ink)).truncate());
+                                }
+                                Skin::Wired => {
                                     let ink = if selected { p.on_selected } else { p.text };
                                     child.add(egui::Label::new(RichText::new(name.to_uppercase()).font(skin::num(13.0)).color(ink)).truncate());
                                 }
@@ -651,7 +728,7 @@ impl App {
                     row(ui, 0, Source::Liked, None, liked_name, "");
                     // The same rows, in the same order, as `side_lists`.
                     row(ui, 1, Source::NewReleases, None, "New releases", "");
-                    if s.queued > 0 || s.view == Some(Source::Queue) {
+                    if s.lists_queue() {
                         row(ui, 2, Source::Queue, None, "Queue", "");
                     }
                     for (i, pl) in s.playlists.iter().enumerate() {
@@ -685,11 +762,7 @@ impl App {
         if self.big {
             self.fetch_lyrics(&mut s);
             let out = focus(ui, &s);
-            if let (Some(i), Some(e)) = (out.play, self.engine.get()) {
-                s.queued = s.queued.saturating_sub(i - s.qi);
-                s.dir = 1;
-                s.play_at(&e.player(), i);
-            }
+            if let (Some(i), Some(e)) = (out.play, self.engine.get()) { s.jump_to(&e.player(), i) }
             if s.since.is_some() { self.bars_shown.set(true) } // the meter and lyric lines move
             drop(s);
             if let Some(id) = out.like { self.toggle_like(id) }
@@ -697,9 +770,7 @@ impl App {
             if let Some(src) = out.goto { self.big = false; self.open(src, &ui.ctx().clone()) }
             return;
         }
-        if s.view == Some(Source::Queue) {
-            s.tracks = s.queue.iter().skip(s.qi).cloned().collect(); // the playing song, then what's next
-        }
+        s.sync_queue_view();
         let (title, img) = match &s.view {
             None => (String::new(), None),
             Some(Source::Liked) => ("Liked Songs".to_string(), None),
@@ -767,10 +838,11 @@ impl App {
                     ui.add_space(24.0);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
-                        ui.add_space(match sk { Skin::Wired => 22.0, Skin::Swiss => 4.0, });
+                        ui.add_space(match sk { Skin::Wired => 22.0, Skin::Swiss => 4.0, Skin::Ascii => 10.0 });
                         match sk {
                             Skin::Wired => { ui.label(RichText::new(kind).size(12.0).color(p.dim)); }
                             Skin::Swiss => { ui.label(RichText::new(kind).font(skin::num(13.0)).color(p.text)); }
+                            Skin::Ascii => { ui.label(RichText::new(kind).font(small(sk)).color(p.dim)); }
                         }
                         let r = ui.add(egui::Label::new(RichText::new(&title).font(skin::title(l.title_size))).truncate());
                         skin::cursor_after(ui, r.rect, 40.0);
@@ -781,7 +853,7 @@ impl App {
                         }
                         let n = s.tracks.len();
                         let count = match sk {
-                            Skin::Wired => format!("{n:02} {unit}"),
+                            Skin::Wired | Skin::Ascii => format!("{n:02} {unit}"),
                             Skin::Swiss => format!("{n} {unit}"),
                         };
                         match &s.error {
@@ -867,7 +939,7 @@ impl App {
                     // Wired stacks it under the title.
                     // Leave the scrollbar its lane, or the rows push the window wider than its panel.
                     let w = ui.available_width() - ui.spacing().scroll.allocated_width();
-                    let one_line = sk == Skin::Swiss;
+                    let one_line = sk != Skin::Wired; // title over artist only in Wired
                     let [c_num, c_title, c_artist, c_album, c_dur] = if one_line {
                         [10.0, 62.0, w * 0.42, w * 0.66, w - 10.0]
                     } else {
@@ -878,6 +950,7 @@ impl App {
                     let head_font = match sk {
                         Skin::Wired => skin::num(17.0),
                         Skin::Swiss => FontId::proportional(11.0),
+                        Skin::Ascii => skin::num(13.0),
                     };
                     let labels: &[(f32, &str)] = match sk {
                         Skin::Wired => &[(c_num, "NO."), (c_title, "TITLE"), (c_album, "ALBUM")],
@@ -891,6 +964,10 @@ impl App {
                     match sk {
                         Skin::Wired => painter.extend(egui::Shape::dashed_line(&[rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, p.line), 4.0, 3.0)),
                         Skin::Swiss => { painter.hline(rect.x_range(), rect.bottom(), Stroke::new(2.0_f32, p.text)); }
+                        Skin::Ascii => {
+                            let dash = painter.layout_no_wrap("-".into(), FontId::proportional(14.0), p.line).size().x;
+                            painter.text(rect.left_bottom(), egui::Align2::LEFT_CENTER, "-".repeat((rect.width() / dash) as usize), FontId::proportional(14.0), p.line);
+                        }
                     }
                     ui.add_space(-6.0);
 
@@ -903,10 +980,12 @@ impl App {
                     let num_font = match sk {
                         Skin::Wired => skin::num(22.0),
                         Skin::Swiss => skin::title(22.0),
+                        Skin::Ascii => skin::num(15.0),
                     };
                     let time_font = match sk {
                         Skin::Wired => skin::num(20.0),
                         Skin::Swiss => FontId::proportional(13.0),
+                        Skin::Ascii => FontId::proportional(14.0),
                     };
                     let cell_size = match sk { Skin::Swiss => 15.0, _ => 13.0 };
                     let mut area = egui::ScrollArea::vertical().auto_shrink(false);
@@ -930,7 +1009,7 @@ impl App {
                             let current = t.id == now_id;
                             let on = cursor == Some(i);
                             if moused && r.hovered() { point = Some(i) }
-                            let (ink, sub) = skin::row_bg(ui, rect, current, on);
+                            let (ink, sub) = skin::row_bg(ui, rect, current, on, i / 2 % 2 == 1);
                             // Songs Spotify refused this session fade out.
                             let (ink, sub) = if t.id.as_ref().is_some_and(|id| s.unplayable.contains(id)) { (p.dim.gamma_multiply(0.5), p.dim.gamma_multiply(0.4)) } else { (ink, sub) };
                             let (x, y) = (rect.left(), rect.center().y);
@@ -938,7 +1017,7 @@ impl App {
                                 skin::now_mark(ui.painter(), pos2(x + c_num, y), ink, sk, s.since.is_some(), ui.input(|i| i.time));
                                 self.bars_shown.set(true);
                             } else {
-                                let n = if sk.blocky() || sk == Skin::Swiss { format!("{:02}", i + 1) } else { (i + 1).to_string() };
+                                let n = format!("{:02}", i + 1);
                                 ui.painter().text(pos2(x + c_num, y), egui::Align2::LEFT_CENTER, n, num_font.clone(), p.dim);
                             }
                             // One left-aligned, truncated label per cell; returns where its text landed.
@@ -1007,11 +1086,8 @@ impl App {
                 forget_unplayable(&mut s.unplayable, &id); // a click gives a faded song another try
             }
             if s.view == Some(Source::Queue) {
-                // Picking from the queue jumps ahead in it, using up hand-queued songs on the way.
-                let at = s.qi + i;
-                s.queued = s.queued.saturating_sub(i);
-                s.dir = 1;
-                s.play_at(&e.player(), at);
+                let at = s.qi + i; // picking from the queue jumps ahead in it
+                s.jump_to(&e.player(), at);
             } else {
                 let (list, src) = (s.tracks.clone(), s.view.clone());
                 s.start(&e.player(), list, Some(i), src);
@@ -1058,6 +1134,7 @@ impl App {
             let margin = match sk {
                 Skin::Wired => egui::Margin::symmetric(14, 10),
                 Skin::Swiss => egui::Margin { left: 30, right: 30, top: 14, bottom: 10 },
+                Skin::Ascii => egui::Margin::symmetric(4, 0),
             };
             egui::Frame::new().inner_margin(margin).show(ui, |ui| match engine.get() {
                 Some(_) => self.transport(ui, ctx),
@@ -1084,7 +1161,7 @@ impl App {
         let left = Rect::from_min_size(full.min, vec2(side, full.height()));
         ui.put(left, |ui: &mut egui::Ui| ui.horizontal_centered(|ui| {
             if let Some(t) = &s.now {
-                let size = match sk { Skin::Wired => 52.0, Skin::Swiss => 44.0, };
+                let size = match sk { Skin::Wired | Skin::Ascii => 52.0, Skin::Swiss => 44.0, };
                 let art = skin::cover(ui, t.thumb(), size, Stamp::None, false);
                 let r = ui.interact(art, egui::Id::new("now-cover"), Sense::click());
                 r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
@@ -1177,8 +1254,8 @@ impl App {
             if let Some(v) = at { new_volume = Some(v) }
             if r.drag_stopped() || r.clicked() { set_setting("volume", &format!("{:.2}", at.unwrap_or(self.volume))) }
             match sk {
-                Skin::Wired => { ui.label(RichText::new("VOL").font(small(sk)).color(p.dim)); }
-                _ => {
+                Skin::Wired | Skin::Ascii => { ui.label(RichText::new("VOL").font(small(sk)).color(p.dim)); }
+                Skin::Swiss => {
                     let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                     let c = r.center();
                     ui.painter().rect_filled(Rect::from_center_size(c - vec2(3.5, 0.0), vec2(4.0, 6.0)), 1.0, p.dim);
@@ -1194,7 +1271,7 @@ impl App {
         }).response);
         drop(s);
 
-        if let Some(v) = new_volume { self.set_volume(v) }
+        if let Some(v) = new_volume { self.muted = None; self.set_volume(v) } // dragging unmutes
         if toggle_shuffle { self.toggle_shuffle() }
         if cycle_repeat { self.cycle_repeat() }
         for c in cmds { self.command(c) }

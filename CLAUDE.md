@@ -1,8 +1,9 @@
 # Resona
 
 A small native Spotify player for macOS: Rust, egui/eframe for the UI, librespot for sign-in and playback.
-Two skins, each with a dark and a light palette: **Wired** (Lain-style cyber/pixel, the default) and **Swiss**
-(print grid, huge type, one red rule). Others (Y2K, macOS, Phosphor, Brutal) were tried and dropped.
+Three skins, each with a dark and a light palette: **Wired** (Lain-style cyber/pixel, the default), **Swiss**
+(print grid, huge type, one red rule) and **ASCII** (a teletype printout: every widget is 7-bit characters, Courier).
+Others (Y2K, macOS, Phosphor, Brutal) were tried and dropped.
 
 ## Build and run
 
@@ -21,7 +22,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `client_id` | the client ID of the user's own Spotify developer app (asked for on first launch; `RESONA_CLIENT_ID` overrides) |
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, accent, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
+| `settings` | `key=value`: skin, theme, accent (a name or `#rrggbb`), volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 
@@ -32,7 +33,7 @@ Delete the first two to sign in again (and `liked` too when switching accounts: 
 | file | what |
 |---|---|
 | `src/main.rs` | `App` (UI state), startup, `open_list()` (load a list), `command()` (all playback), the frame loop |
-| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand; `t` switches a flow-style card and a devboard-style board) on the same engine, `open_list` and `command` |
+| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand; `t` switches a flow-style card and a devboard-style board) on the same engine and the same free functions (`open_list`, `command`, `fetch_lyrics`, `add_to`, …); the songs box can hold the keys (`?`), the playlist picker (`p`) or the lyrics (`v`) instead (`Tui::instead`) |
 | `src/state.rs` | `State` and the queue: `Source`, `Cmd`, `Repeat`, `start` / `step` / `enqueue` / `set_shuffle` |
 | `src/engine.rs` | librespot: `connect()` (sign-in, session, player, event loop), liked-songs and playlist-contents loaders |
 | `src/api.rs` | Web API (`get`, `WebAuth`, search, like, create and add to playlist) and the session loaders (`session_playlist`, `session_artist`, `session_album`) |
@@ -40,7 +41,7 @@ Delete the first two to sign in again (and `liked` too when switching accounts: 
 | `src/controls.rs` | input: keyboard, macOS menu bar (`muda`), media keys / Now Playing (`souvlaki`) |
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
 | `src/settings.rs` | reading and writing `~/.resona/settings` and `unplayable` |
-| `assets/` | bundled OFL fonts + licenses: DotGothic16 + VT323 (Wired), Archivo regular + extra-bold (Swiss) |
+| `assets/` | bundled OFL fonts + licenses: DotGothic16 + VT323 (Wired), Archivo regular + extra-bold (Swiss), Courier Prime regular + bold (ASCII) |
 
 The Archivo files are static instances baked from the variable font with fontTools: egui only reads a variable
 font's default instance.
@@ -102,13 +103,17 @@ font's default instance.
 - **Toasts:** `State::say` shows a short note above the player bar (3 s, errors 6 s), one at a time; `enqueue`
   announces itself. The CLI shows the same note in its status line while it lasts.
 - **Accent colours** (`skin::Accent`): red is each skin's own; the others are swapped into every palette by
-  `tinted` (text on the accent goes black or white), all built once in `pal_of`. The app icon is drawn in Rust
+  `tinted` (text on the accent goes black or white), all built once in `pal_of`. `Accent::Custom` is your own
+  colour (saved as `accent=#rrggbb`): each skin and theme shows `readable`'s shade of it (pulled toward black or
+  white until it stands out 3:1), made on first use in `custom_pal`. In the skin menu, hovering a swatch only
+  previews it (`peek_accent`); `kept_accent` is what's saved and what the Dock icon follows. The app icon is drawn in Rust
   (`skin::app_icon`): the Dock icon is repainted on change (`set_app_icon`, AppKit; eframe sets one only at
   startup), and `bundle.sh` takes the icon file's pixels from `resona icon`. The CLI reads the accent at start.
 - **Other systems:** the menu bar (`muda`), the cursor fix and the Dock icon are macOS-only (`cfg(target_os =
   "macos")`, and macOS-only dependencies); elsewhere the keyboard handles the Ctrl shortcuts, winit the cursor,
   and `set_app_icon` sets the window icon. Shortcut labels go through `ui::cmd_keys` (⌘ → Ctrl). Media keys:
-  macOS and Linux (MPRIS over zbus); Windows needs an HWND, not wired yet. `.github/workflows/build.yml` builds
+  macOS and Linux (MPRIS over zbus), in the window and the CLI (`controls::media_controls`, shared; the CLI turns
+  the main run loop itself, where macOS delivers them); Windows needs an HWND, not wired yet. `.github/workflows/build.yml` builds
   all three on every push: the only check that Windows and Linux still compile.
 - Errors are stored raw in `State.error` (or an error toast's `Notice`) and shown through `short_err()` (full text on hover).
 
@@ -117,5 +122,6 @@ font's default instance.
 - Keep it small: stdlib and existing deps first, no new abstractions without a second user.
 - Mark deliberate shortcuts with a `// ponytail:` comment that names the limit and the upgrade path.
 - Non-trivial logic gets one small `#[test]` next to it.
-- Both skins must keep working: anything drawn goes through `skin.rs`, and `skin::every_skin_lays_out_text_in_every_font`
-  catches a font that fails to load.
+- Every skin must keep working: anything drawn goes through `skin.rs`, and `skin::every_skin_lays_out_text_in_every_font`
+  catches a font that fails to load. ASCII draws its frames, bars and covers as text (`char_box`, `char_bar`,
+  `char_cover`) and never shows real cover art.

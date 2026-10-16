@@ -34,13 +34,13 @@ pub fn set_setting(key: &str, value: &str) {
 /// The accent colour from ~/.resona/settings (the skin's red if unset).
 pub fn saved_accent() -> skin::Accent {
     let saved = setting("accent").unwrap_or_default();
-    skin::Accent::ALL.into_iter().find(|a| format!("{a:?}") == saved).unwrap_or_default()
+    skin::Accent::parse(&saved).unwrap_or_default()
 }
 
 /// Skin, theme and accent survive restarts.
 pub fn save_settings(ctx: &egui::Context) {
     set_setting("skin", &format!("{:?}", skin::skin(ctx)));
-    set_setting("accent", &format!("{:?}", skin::accent(ctx)));
+    set_setting("accent", &skin::kept_accent(ctx).key()); // a name, or #rrggbb
     set_setting("theme", &format!("{:?}", ctx.options(|o| o.theme_preference)));
 }
 

@@ -25,6 +25,8 @@ muda = "0.21"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSCursor", "NSApplication", "NSResponder", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+# The terminal player turns the main run loop by hand, which is where Now Playing delivers media keys.
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFDate"] }
 
 # Media keys on Linux go over D-Bus (MPRIS); zbus is pure Rust, so no libdbus to install.
 [target.'cfg(target_os = "linux")'.dependencies]

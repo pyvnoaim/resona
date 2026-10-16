@@ -22,6 +22,21 @@
 - [ ] "Add to playlist" puts first the lists you last added to from Resona (`added_to`); adds made in other
       Spotify clients don't count.
 - [ ] A song radio is not kept: it isn't in the sidebar and isn't reopened at launch (`Source::Radio` has no key).
+- [ ] The sidebar lays out every playlist row each frame (the song list uses `show_rows`); slow with hundreds of
+      playlists. Keyboard reveal (`scroll_to_me`) would need the song list's approach.
+- [ ] egui's image cache keeps every cover it decoded until quit; `ctx.forget_image` on the list being left
+      would cap memory over long sessions.
+- [ ] The whole window redraws at 20 fps while the playing row's equaliser is on screen.
+- [ ] ASCII never shows real cover art (egui hands over textures, not pixels): dither the decoded image to
+      `skin::RAMP` if wanted. Cut-off names still end in `…`, egui's elision character, which isn't 7-bit.
+- [ ] Courier is wide, so long playlist names in the ASCII sidebar are cut early.
+- [ ] The accent swatches take the mouse only (no arrow keys yet), and the menu bar's Accent submenu has no
+      custom colour.
+- [ ] Every custom accent tried stays in memory until quit (`skin::custom_pal`, ~100 bytes each).
+- [ ] The CLI wakes 10 times a second while it waits, to hear media keys (macOS delivers them on the main run
+      loop, `cli::turn_run_loop`). A waker thread would bring idle back to zero.
+- [ ] The CLI's key list (`?`) is cut off in short terminals; `c` needs `pbcopy`, `wl-copy`, `xclip` or `clip`
+      (nothing over SSH; OSC 52 would reach the local terminal).
 
 ## Ideas
 
