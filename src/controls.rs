@@ -178,7 +178,6 @@ impl App {
         if self.big { return } // no list on screen, so no highlighted song
         let mut s = self.state.lock().unwrap();
         if let (Pane::Songs, Some(t)) = (self.pane, s.tracks.get(self.row).cloned()) {
-            s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
             s.enqueue(&e.player(), t, false);
         }
     }

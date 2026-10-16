@@ -43,16 +43,103 @@ pub fn small(s: Skin) -> FontId {
     }
 }
 
+/// What the song menu asks for after drawing.
+#[derive(Default)]
+pub struct SongMenu {
+    pub play: bool,
+    pub enqueue: Option<(api::Track, bool)>,
+    pub like: Option<String>,
+    pub add: Option<(String, String, String)>,
+    pub create: Option<(String, String)>,
+    pub members: bool,
+    pub radio: Option<Source>,
+}
+
+/// A song's right-click menu, shared by the track list and the player bar. `play` offers "Play" (not for
+/// the song already playing); `own` is the playlists it can be added to.
+pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, play: bool, out: &mut SongMenu) {
+    if play && ui.button("Play").clicked() {
+        out.play = true;
+        ui.close();
+    }
+    if ui.button("Play next").clicked() {
+        out.enqueue = Some((t.clone(), true));
+        ui.close();
+    }
+    if ui.button("Add to queue").clicked() {
+        out.enqueue = Some((t.clone(), false));
+        ui.close();
+    }
+    let Some(id) = &t.id else { return };
+    let liked = s.liked.contains(id);
+    if ui.button(if liked { "Remove from Liked Songs" } else { "Save to Liked Songs" }).clicked() {
+        out.like = Some(id.clone());
+        ui.close();
+    }
+    ui.menu_button("Add to playlist", |ui| {
+        out.members = true;
+        // Named after the song, as Spotify does.
+        if ui.button("+ New playlist").clicked() {
+            out.create = Some((t.name.clone(), id.clone()));
+            ui.close();
+        }
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (pid, name) in own_lists(s, me) {
+                if s.members.get(&pid).is_some_and(|m| m.contains(id)) {
+                    ui.add_enabled(false, egui::Button::new(format!("√ {name}"))).on_disabled_hover_text("Already in this playlist");
+                } else if ui.button(&name).clicked() {
+                    out.add = Some((pid, name, id.clone()));
+                    ui.close();
+                }
+            }
+        });
+    });
+    if ui.button("Go to song radio").clicked() {
+        out.radio = Some(Source::Radio { track: id.clone(), name: t.name.clone() });
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Copy song link").clicked() {
+        ui.ctx().copy_text(format!("https://open.spotify.com/track/{id}"));
+        ui.close();
+    }
+}
+
+/// The pages a song's names lead to.
+fn artist_of(t: &api::Track) -> Option<Source> {
+    t.artists.iter().find_map(|a| Some(Source::Artist { id: a.id.clone()?, name: a.name.clone() }))
+}
+fn album_of(t: &api::Track) -> Option<Source> {
+    t.album.id.clone().map(|id| Source::Album { id, name: t.album.name.clone() })
+}
+
+/// A name that leads to a page: underlined on hover, the hand over it.
+fn link(ui: &egui::Ui, at: Rect, id: egui::Id, color: egui::Color32) -> egui::Response {
+    let r = ui.interact(at, id, Sense::click());
+    if r.hovered() { ui.painter().hline(at.x_range(), at.bottom() - 1.0, Stroke::new(1.0_f32, color)); }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Playlists a track can be added to: yours and the collaborative ones, the ones you last added to first.
+fn own_lists(s: &State, me: &str) -> Vec<(String, String)> {
+    let mut own: Vec<_> = s.playlists.iter().filter(|pl| pl.web_readable(me)).map(|pl| (pl.id.clone(), pl.name.clone())).collect();
+    own.sort_by_key(|(id, _)| s.added_to.iter().position(|p| p == id).unwrap_or(usize::MAX)); // stable: the rest keep sidebar order
+    own
+}
+
 /// What the focus view asks for after drawing.
 #[derive(Default)]
 pub struct FocusOut {
     pub play: Option<usize>,
     pub like: Option<String>,
     pub back: bool,
+    pub goto: Option<Source>,
 }
 
-/// The focus view (design C): the sidebar steps aside, the cover's own pixels fill the background, and
-/// the song sits in the middle with its lyrics. No lyrics: a signal meter and the next three songs.
+/// The focus view: the sidebar steps aside and the song takes the screen with its lyrics; no lyrics: a signal
+/// meter and the next three songs. Wired (design C): the cover's own pixels fill the background, the song sits
+/// in the middle. Swiss (design A): plain paper, the cover on the left, the rest beside it under one black rule.
 pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
     let (l, p, sk) = (skin::look(ui.ctx()), skin::pal(ui.ctx()), skin::skin(ui.ctx()));
     let mut out = FocusOut::default();
@@ -62,15 +149,16 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         ui.centered_and_justified(|ui| ui.label(RichText::new("Nothing playing yet.").font(small(sk)).color(p.dim)));
         return out;
     };
+    let swiss = sk == Skin::Swiss;
     // Backdrop: the smallest cover, blown up without smoothing, under a dark veil.
-    if let Some(thumb) = t.thumb() {
+    if let (false, Some(thumb)) = (swiss, t.thumb()) {
         let side = full.width().max(full.height());
         let uv_w = full.width() / side;
         let uv_h = full.height() / side;
         let uv = Rect::from_center_size(pos2(0.5, 0.5), vec2(uv_w, uv_h));
         egui::Image::new(thumb).texture_options(egui::TextureOptions::NEAREST).uv(uv).paint_at(ui, full);
+        ui.painter().rect_filled(full, 0.0, p.ground.gamma_multiply(0.68));
     }
-    ui.painter().rect_filled(full, 0.0, p.ground.gamma_multiply(0.68));
 
     // Corners: the way back, and where we are.
     let hint = skin::num(if sk.blocky() { 20.0 } else { 13.0 });
@@ -87,15 +175,34 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
     let art = (full.height() * if has_lyrics { 0.44 } else { 0.38 }).clamp(140.0, 360.0);
     // Centre the whole stack vertically: cover plus roughly what goes under it.
     let below = if has_lyrics { 210.0 } else { 300.0 };
-    ui.add_space(((full.height() - art - below) / 2.0).max(52.0));
-    ui.vertical_centered(|ui| {
+    let cover_url = t.album.images.first().map(|i| i.url.as_str());
+    // Title, names, heart, then lyrics (or meter and up next): centred under the cover, or flush left beside it.
+    let mut body = |ui: &mut egui::Ui, centred: bool, title: f32| {
         ui.spacing_mut().item_spacing.y = 10.0;
-        skin::cover(ui, t.album.images.first().map(|i| i.url.as_str()), art, Stamp::None, true);
-        ui.add_space(6.0);
-        let name = t.name.clone();
-        ui.add(egui::Label::new(RichText::new(name).font(skin::title((l.title_size * 0.8).clamp(26.0, 60.0)))).truncate());
-        // Artist · album, then the heart.
-        let line = ui.label(RichText::new(format!("{} · {}", t.artist_line(), t.album.name)).size(15.0).color(p.dim));
+        let name = RichText::new(t.name.clone()).font(skin::title(title));
+        if centred { ui.add(egui::Label::new(name).truncate()); } else { ui.add(egui::Label::new(name).wrap()); }
+        // Artist · album, then the heart; each name opens its page.
+        // Cut to the column (less room for the heart): the artist gets up to 60%, the album the rest.
+        let font = FontId::proportional(15.0);
+        let room = (ui.available_width() - 40.0).max(60.0);
+        let cut = |text: String, width: f32| {
+            let mut job = egui::text::LayoutJob::simple_singleline(text, font.clone(), p.dim);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+            ui.painter().layout_job(job)
+        };
+        let dot = cut(" · ".into(), room);
+        let artist = cut(t.artist_line(), (room * 0.6).max(room - dot.size().x - ui.painter().layout_no_wrap(t.album.name.clone(), font.clone(), p.dim).size().x));
+        let album = cut(t.album.name.clone(), (room - artist.size().x - dot.size().x).max(0.0));
+        let size = vec2(artist.size().x + dot.size().x + album.size().x, artist.size().y);
+        let (line, _) = ui.allocate_exact_size(size, Sense::hover());
+        let artist_at = Rect::from_min_size(line.min, artist.size());
+        let album_at = Rect::from_min_size(line.min + vec2(artist.size().x + dot.size().x, 0.0), album.size());
+        ui.painter().galley(line.min + vec2(artist.size().x, 0.0), dot, p.dim);
+        ui.painter().galley(artist_at.min, artist, p.dim);
+        ui.painter().galley(album_at.min, album, p.dim);
+        if link(ui, artist_at, egui::Id::new("focus-artist"), p.dim).clicked() { out.goto = artist_of(t) }
+        if link(ui, album_at, egui::Id::new("focus-album"), p.dim).clicked() { out.goto = album_of(t) }
+        let line = ui.interact(line, egui::Id::new("focus-line"), Sense::hover());
         if let Some(id) = &t.id {
             let heart = Rect::from_center_size(pos2(line.rect.right() + 18.0, line.rect.center().y), vec2(26.0, 26.0));
             if skin::heart_toggle(ui, heart, egui::Id::new("focus-like"), s.liked.contains(id), true, false).clicked() {
@@ -129,7 +236,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
                 };
                 let lay = |j: isize, f: usize| {
                     let mut job = egui::text::LayoutJob::simple(text(j).to_owned(), fonts[f].clone(), p.text, wrap);
-                    job.halign = egui::Align::Center;
+                    job.halign = if centred { egui::Align::Center } else { egui::Align::LEFT };
                     painter.layout_job(job)
                 };
                 // Line j's height while line c is sung, and where its middle sits: stacked out from c in the middle.
@@ -156,7 +263,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
                     for (f, share) in [(i, 1.0 - t), (1, t)] {
                         if alpha * share < 0.01 { continue }
                         let g = lay(j, f);
-                        let at = pos2(rect.center().x, y - g.size().y / 2.0);
+                        let at = pos2(if centred { rect.center().x } else { rect.left() }, y - g.size().y / 2.0);
                         painter.galley_with_override_text_color(at, g, ink.gamma_multiply(alpha * share));
                     }
                 }
@@ -174,15 +281,35 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
                 skin::meter(ui, (full.width() * 0.5).min(560.0), 64.0, ui.input(|i| i.time), s.since.is_some());
                 let label = match sk { Skin::Wired => "NO LYRICS · 歌詞なし · UP NEXT >", Skin::Swiss => "No lyrics · Up next" };
                 ui.label(RichText::new(label).font(small(sk)).color(p.dim));
-                out.play = up_next(ui, s, pos);
+                out.play = up_next(ui, s, pos, centred);
             }
         }
-    });
+    };
+    if swiss {
+        // Five twelfths for the cover, the other seven for the words, tops aligned on the rule.
+        let area = Rect::from_min_max(full.min + vec2(56.0, 72.0), full.max - vec2(56.0, 40.0));
+        let gap = 40.0;
+        let side = ((area.width() - gap) * 5.0 / 12.0).min(area.height()).min(560.0);
+        let cover = Rect::from_min_size(pos2(area.left(), area.center().y - side / 2.0), vec2(side, side));
+        skin::cover(&mut ui.new_child(egui::UiBuilder::new().max_rect(cover)), cover_url, side, Stamp::None, true);
+        let words = Rect::from_min_max(pos2(cover.right() + gap, cover.top()), area.max);
+        ui.painter().hline(words.x_range(), words.top(), Stroke::new(2.0_f32, p.text));
+        let mut col = ui.new_child(egui::UiBuilder::new().max_rect(words.with_min_y(words.top() + 18.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+        body(&mut col, false, (side * 0.16).clamp(36.0, 88.0));
+    } else {
+        ui.add_space(((full.height() - art - below) / 2.0).max(52.0));
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 10.0;
+            skin::cover(ui, cover_url, art, Stamp::None, true);
+            ui.add_space(6.0);
+            body(ui, true, (l.title_size * 0.8).clamp(26.0, 60.0));
+        });
+    }
     out
 }
 
-/// The next three songs in the queue as cards; the first says when it starts. Returns a clicked one.
-pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32) -> Option<usize> {
+/// The next three songs in the queue as cards (as many as fit); the first says when it starts. Returns a clicked one.
+pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32, centred: bool) -> Option<usize> {
     let p = skin::pal(ui.ctx());
     let left = s.now.as_ref().map_or(0, |t| t.duration_ms.saturating_sub(pos));
     // The songs playback would actually reach: refused ones are skipped there, so they're left out here too.
@@ -191,15 +318,17 @@ pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32) -> Option<usize> {
         .filter(|(_, t)| !t.id.as_ref().is_some_and(|id| s.unplayable.contains(id)))
         .take(3)
         .collect();
-    if cards.is_empty() { return None }
     let (w, gap) = (230.0, 12.0);
+    let fit = (((ui.available_width() + gap) / (w + gap)) as usize).max(1);
+    let cards = &cards[..cards.len().min(fit)];
+    if cards.is_empty() { return None }
     let total = cards.len() as f32 * w + (cards.len() - 1) as f32 * gap;
     let mut picked = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
-        ui.add_space((ui.available_width() - total) / 2.0);
+        if centred { ui.add_space((ui.available_width() - total) / 2.0) }
         let sk = skin::skin(ui.ctx());
-        for (k, (i, t)) in cards.into_iter().enumerate() {
+        for (k, &(i, t)) in cards.iter().enumerate() {
             let (rect, r) = ui.allocate_exact_size(vec2(w, 66.0), Sense::click());
             let first = k == 0;
             let (fill, ink, dim) = (p.panel.gamma_multiply(0.85), p.text, p.dim);
@@ -488,6 +617,7 @@ impl App {
             drop(s);
             if let Some(id) = out.like { self.toggle_like(id) }
             if out.back { self.big = false }
+            if let Some(src) = out.goto { self.big = false; self.open(src, &ui.ctx().clone()) }
             return;
         }
         if s.view == Some(Source::Queue) {
@@ -500,6 +630,7 @@ impl App {
             Some(Source::Queue) => ("Queue".to_string(), None),
             Some(Source::Artist { name, .. }) => (name.clone(), s.artist.as_ref().and_then(|a| a.portrait.clone())),
             Some(Source::Album { name, .. }) => (name.clone(), s.tracks.first().and_then(|t| t.album.images.first()).map(|i| i.url.clone())),
+            Some(Source::Radio { name, .. }) => (format!("{name} Radio"), s.tracks.first().and_then(|t| t.album.images.first()).map(|i| i.url.clone())),
             Some(Source::Playlist(id)) => s.playlists.iter().find(|pl| &pl.id == id)
                 .map(|pl| (pl.name.clone(), pl.images.as_ref().and_then(|v| v.first()).map(|i| i.url.clone())))
                 .unwrap_or_default(),
@@ -511,6 +642,7 @@ impl App {
             Some(Source::Queue) => ("queue", "lst", "キュー"),
             Some(Source::Artist { .. }) => ("artist", "art", "アーティスト"),
             Some(Source::Album { .. }) => ("album", "alb", "アルバム"),
+            Some(Source::Radio { .. }) => ("radio", "rad", "ラジオ"),
             Some(_) => ("playlist", "pls", "プレイリスト"),
         };
         let file = match &s.view {
@@ -525,8 +657,7 @@ impl App {
             _ => (what.to_uppercase(), if results { "RESULTS" } else { "TRACKS" }),
         };
         let kind = kind.as_str();
-        let (mut clicked, mut like, mut add, mut enqueue) = (self.enter.take(), None, None, None); // Enter plays like a click
-        let (mut want_members, mut create) = (false, None);
+        let (mut clicked, mut like) = (self.enter.take(), None); // Enter plays like a click
         let (mut goto, mut play_all, mut point): (Option<Source>, Option<bool>, Option<usize>) = (None, None, None);
         let mut resort = false;
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
@@ -535,9 +666,8 @@ impl App {
         if let Some(row) = jump_row { (self.pane, self.row) = (Pane::Songs, row) }
         let (cursor, reveal, moused) = ((self.pane == Pane::Songs).then_some(self.row), self.reveal, moused(ui));
         let ctx = ui.ctx().clone();
-        // Playlists a track can be added to: yours and the collaborative ones.
         let me = self.engine.get().map(|e| e.session().username()).unwrap_or_default();
-        let own: Vec<(String, String)> = s.playlists.iter().filter(|pl| pl.web_readable(&me)).map(|pl| (pl.id.clone(), pl.name.clone())).collect();
+        let mut menu = SongMenu::default();
 
         skin::window(ui, Win::Main, &file, tag, None, |ui| {
             let pad = l.pad;
@@ -594,10 +724,7 @@ impl App {
                                     Some(l) => format!("{count} · {}", l.to_uppercase()),
                                     None => count,
                                 };
-                                match (&s.notice, sk) {
-                                    (Some(note), _) => { ui.label(RichText::new(format!("{count} · {note}")).font(small(sk)).color(p.dim)); }
-                                    (None, _) => { ui.label(RichText::new(count).font(small(sk)).color(p.dim)); }
-                                }
+                                ui.label(RichText::new(count).font(small(sk)).color(p.dim));
                             }
                         }
                         if n > 0 && view != Source::Queue {
@@ -743,13 +870,9 @@ impl App {
                             };
                             // Artist and album names lead to their pages: underline on hover, click to open.
                             let mut link = |ui: &mut egui::Ui, at: Rect, key: &str, to: Option<Source>, color| {
-                                let Some(to) = to else { return };
-                                let r = ui.interact(at, egui::Id::new((key, i)), Sense::click());
-                                if r.hovered() { ui.painter().hline(at.x_range(), at.bottom() - 1.0, Stroke::new(1.0_f32, color)); }
-                                if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { goto = Some(to) }
+                                if let Some(to) = to && link(ui, at, egui::Id::new((key, i)), color).clicked() { goto = Some(to) }
                             };
-                            let artist_page = t.artists.iter().find_map(|a| Some(Source::Artist { id: a.id.clone()?, name: a.name.clone() }));
-                            let album_page = t.album.id.clone().map(|id| Source::Album { id, name: t.album.name.clone() });
+                            let (artist_page, album_page) = (artist_of(t), album_of(t));
                             if one_line {
                                 let name = t.name.clone();
                                 cell(ui, c_title, c_artist - 12.0, name, cell_size, ink);
@@ -782,50 +905,8 @@ impl App {
                                 }
                             }
 
-                            r.context_menu(|ui| {
-                                if ui.button("Play").clicked() {
-                                    clicked = Some(i);
-                                    ui.close();
-                                }
-                                if ui.button("Play next").clicked() {
-                                    enqueue = Some((t.clone(), true));
-                                    ui.close();
-                                }
-                                if ui.button("Add to queue").clicked() {
-                                    enqueue = Some((t.clone(), false));
-                                    ui.close();
-                                }
-                                let Some(id) = &t.id else { return };
-                                let liked = s.liked.contains(id);
-                                if ui.button(if liked { "Remove from Liked Songs" } else { "Save to Liked Songs" }).clicked() {
-                                    like = Some(id.clone());
-                                    ui.close();
-                                }
-                                ui.menu_button("Add to playlist", |ui| {
-                                    want_members = true;
-                                    // Named after the song, as Spotify does.
-                                    if ui.button("+ New playlist").clicked() {
-                                        create = Some((t.name.clone(), id.clone()));
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                                        for (pid, name) in &own {
-                                            if s.members.get(pid).is_some_and(|m| m.contains(id)) {
-                                                ui.add_enabled(false, egui::Button::new(format!("✓ {name}"))).on_disabled_hover_text("Already in this playlist");
-                                            } else if ui.button(name).clicked() {
-                                                add = Some((pid.clone(), name.clone(), id.clone()));
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                });
-                                ui.separator();
-                                if ui.button("Copy song link").clicked() {
-                                    ui.ctx().copy_text(format!("https://open.spotify.com/track/{id}"));
-                                    ui.close();
-                                }
-                            });
+                            r.context_menu(|ui| song_menu(ui, t, &s, &me, true, &mut menu));
+                            if std::mem::take(&mut menu.play) { clicked = Some(i) }
                             if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { clicked = Some(i) }
                         }
                     };
@@ -856,10 +937,6 @@ impl App {
                 s.start(&e.player(), list, Some(i), src);
             }
         }
-        if let (Some((t, next)), Some(e)) = (enqueue, self.engine.get()) {
-            s.notice = Some(format!("{} \u{201c}{}\u{201d}", if next { "Playing next:" } else { "Queued:" }, t.name));
-            s.enqueue(&e.player(), t, next);
-        }
         if resort { s.cycle_sort() }
         if let (Some(shuffled), Some(e)) = (play_all, self.engine.get()) {
             if shuffled { s.shuffle = true }
@@ -872,10 +949,20 @@ impl App {
             ctx.request_repaint(); // draw the highlight where it is now
         }
         if let Some(id) = like { self.toggle_like(id) }
-        if let Some((playlist, name, track)) = add { self.add_to(playlist, name, track) }
-        if let Some((name, track)) = create { self.new_playlist(name, Some(track), &ctx) }
-        if want_members { self.load_members() }
         if let Some(src) = goto { self.open(src, &ctx) }
+        self.apply_menu(menu, &ctx);
+    }
+
+    /// Does what a song menu asked for.
+    fn apply_menu(&mut self, menu: SongMenu, ctx: &egui::Context) {
+        if let (Some((t, next)), Some(e)) = (menu.enqueue, self.engine.get()) {
+            self.state.lock().unwrap().enqueue(&e.player(), t, next);
+        }
+        if let Some(id) = menu.like { self.toggle_like(id) }
+        if let Some((playlist, name, track)) = menu.add { self.add_to(playlist, name, track, ctx) }
+        if let Some((name, track)) = menu.create { self.new_playlist(name, Some(track), ctx) }
+        if menu.members { self.load_members() }
+        if let Some(src) = menu.radio { self.big = false; self.open(src, ctx) }
     }
 
     pub fn player_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -909,7 +996,8 @@ impl App {
         let pad = sk.blocky();
         let (shuffle, repeat) = (s.shuffle, s.repeat);
 
-        let (mut like_now, mut open_big, mut jump) = (None, false, false);
+        let (mut like_now, mut open_big, mut jump, mut goto) = (None, false, false, None);
+        let (me, mut menu) = (self.engine.get().map(|e| e.session().username()).unwrap_or_default(), SongMenu::default());
         let mut cmds: Vec<Cmd> = vec![];
 
         // Left: now playing. The cover opens the focus view, the name jumps to the song in its list.
@@ -918,7 +1006,9 @@ impl App {
             if let Some(t) = &s.now {
                 let size = match sk { Skin::Wired => 52.0, Skin::Swiss => 44.0, };
                 let art = skin::cover(ui, t.thumb(), size, Stamp::None, false);
-                if ui.interact(art, egui::Id::new("now-cover"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Cover and lyrics (⌘E)").clicked() {
+                let r = ui.interact(art, egui::Id::new("now-cover"), Sense::click());
+                r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Cover and lyrics (⌘E)").clicked() {
                     open_big = true;
                 }
                 // Name over artist, measured and centred on the cover (a nested vertical would sit at the top).
@@ -934,12 +1024,19 @@ impl App {
                 let x = art.right() + 12.0;
                 let below = top + name.size().y + 2.0;
                 let text_w = name.size().x.max(artist.size().x);
-                let text_rect = Rect::from_min_size(pos2(x, top), vec2(text_w, below + artist.size().y - top));
+                // The name jumps to the song in its list, the artist opens the artist's page.
+                let name_rect = Rect::from_min_size(pos2(x, top), name.size());
+                let artist_rect = Rect::from_min_size(pos2(x, below), artist.size());
                 ui.painter().galley(pos2(x, top), name, p.text);
                 ui.painter().galley(pos2(x, below), artist, p.dim);
-                if ui.interact(text_rect, egui::Id::new("now-text"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show in its list (⌘J)").clicked() {
+                let r = ui.interact(name_rect, egui::Id::new("now-text"), Sense::click());
+                r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show in its list (⌘J)").clicked() {
                     jump = true;
                 }
+                let r = link(ui, artist_rect, egui::Id::new("now-artist"), p.dim);
+                r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
+                if r.clicked() { goto = artist_of(t) }
                 if let Some(id) = &t.id {
                     let heart = Rect::from_center_size(pos2(x + text_w + 22.0, art.center().y), vec2(28.0, 28.0));
                     if skin::heart_toggle(ui, heart, egui::Id::new("like-now"), s.liked.contains(id), true, false).on_hover_text("⌘L").clicked() {
@@ -1024,6 +1121,8 @@ impl App {
         if let Some(id) = like_now { self.toggle_like(id) }
         if open_big { self.big = true }
         if jump { self.jump_to_playing(ctx) }
+        if let Some(src) = goto { self.big = false; self.open(src, ctx) }
+        self.apply_menu(menu, ctx);
     }
 }
 

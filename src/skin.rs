@@ -297,6 +297,46 @@ fn dither(painter: &egui::Painter, rect: Rect, tone: Color32) {
     }
 }
 
+// ---------- toast
+
+/// The toast in the bottom right, above the player bar. Wired: a bordered box with an OK / ERR tag.
+/// Swiss: a flat surface under one rule, black when done, red for an error. `left` (1 → 0) drains the bar under it.
+pub fn toast(ctx: &egui::Context, text: &str, error: bool, left: f32) -> Response {
+    let (p, s, l) = (pal(ctx), skin(ctx), look(ctx));
+    let flag = if error { p.accent } else { p.online };
+    egui::Area::new(egui::Id::new("toast"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-(l.edge as f32 + 14.0), -(l.player_h + 14.0)))
+        .show(ctx, |ui| {
+            let frame = match s {
+                Skin::Wired => egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0_f32, if error { p.accent } else { p.line })),
+                Skin::Swiss => egui::Frame::new().fill(p.surface).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 12 }),
+            };
+            let rect = frame.show(ui, |ui| {
+                ui.set_max_width(420.0);
+                ui.horizontal(|ui| match s {
+                    Skin::Wired => {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let (tag, _) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::hover());
+                        ui.painter().rect_filled(tag, 0.0, flag);
+                        ui.painter().text(tag.center(), egui::Align2::CENTER_CENTER, if error { "ERR" } else { "OK" }, num(17.0), p.panel);
+                        ui.add(egui::Label::new(RichText::new(text.to_uppercase()).font(num(19.0)).color(p.text)).truncate());
+                        ui.add_space(2.0);
+                    }
+                    Skin::Swiss => { ui.add(egui::Label::new(RichText::new(text).size(14.0).color(p.text)).truncate()); }
+                });
+            }).response.rect;
+            let painter = ui.painter();
+            if s == Skin::Swiss {
+                painter.hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0_f32, if error { p.accent } else { p.text }));
+            }
+            let bar = if s == Skin::Wired { flag } else { p.dim };
+            painter.rect_filled(Rect::from_min_size(pos2(rect.left(), rect.bottom() - 2.0), vec2(rect.width() * left.clamp(0.0, 1.0), 2.0)), 0.0, bar);
+            ui.interact(rect, egui::Id::new("toast-click"), Sense::click())
+        })
+        .inner
+}
+
 // ---------- windows
 
 #[derive(Clone, Copy, PartialEq)]

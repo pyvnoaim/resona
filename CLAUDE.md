@@ -20,7 +20,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 |---|---|
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style` |
+| `settings` | `key=value`: skin, theme, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 
@@ -87,10 +87,13 @@ font's default instance.
   each playlist (`load_members`) waits for the first "Add to playlist" menu. A failed library load is shown, not
   fatal: playback runs on librespot and keeps working through a ban, and the sidebar falls back to the session's
   rootlist (`session_playlists`: only uploaded covers, mosaics are rebuilt from each list's first albums by `session_mosaic`; every list then opens through the session).
+- **Song radio** (`Source::Radio`): the session's `inspiredby-mix` endpoint turns a song into Spotify's radio
+  playlist (`api::radio_playlist`), which then opens like any session playlist. The Web API's recommendations are
+  closed to developer apps.
 - **Search** asks for pages of 10 and stops at 5 pages; newer developer apps get a lower page-size cap.
 - **Repaints:** nothing redraws when idle; 4 fps while playing, 20 fps while the equaliser bars or meter are on
   screen, ~16 fps while a list is loading.
-- Errors are stored raw in `State.error` and shown through `short_err()` (full text on hover).
+- Errors are stored raw in `State.error` (or an error toast's `Notice`) and shown through `short_err()` (full text on hover).
 
 ## Conventions
 

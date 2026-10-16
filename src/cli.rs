@@ -200,7 +200,6 @@ impl Tui {
             KeyCode::Char('a') if self.pane == Pane::Songs => {
                 let mut s = state.lock().unwrap();
                 if let Some(t) = s.tracks.get(self.row).cloned() {
-                    s.notice = Some(format!("Queued: \u{201c}{}\u{201d}", t.name));
                     s.enqueue(&e.player(), t, false);
                 }
             }
@@ -292,10 +291,10 @@ impl Tui {
 
         // Brand, then whatever the engine has to say.
         lines.push(line(center(&[("resona".into(), FG), (concat!("  v", env!("CARGO_PKG_VERSION")).into(), GUTTER)], cw, None)));
-        let note = match (&s.error, s.status.is_empty(), &s.notice) {
+        let note = match (&s.error, s.status.is_empty(), s.notice()) {
             (Some(err), _, _) => vec![(short_err(err), RED)],
             (None, false, _) => vec![(s.status.clone(), DIM)],
-            (None, true, Some(n)) => vec![(n.clone(), SUB)],
+            (None, true, Some(n)) => vec![(n.text.clone(), if n.error { RED } else { SUB })],
             _ => vec![],
         };
         lines.push(line(center(&note, cw, None)));
@@ -392,7 +391,7 @@ impl Tui {
         } else {
             status.push((title(s, lists), DIM));
             status.push((format!("  ·  {}", count(s, self.spin())), SUB));
-            if let Some(n) = &s.notice { status.push((format!("  ·  {n}"), SUB)) }
+            if let Some(n) = s.notice() { status.push((format!("  ·  {}", n.text), if n.error { RED } else { SUB })) }
         }
         let mut head = Seg::new(w, Some(BG));
         head.pad(2).put("▌ ", RED).put("resona", FG).put(concat!(" v", env!("CARGO_PKG_VERSION")), GUTTER);

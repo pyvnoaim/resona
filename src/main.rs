@@ -12,7 +12,7 @@ mod ui;
 
 use std::{
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -103,6 +103,7 @@ impl App {
         app.attach_menu(&cc.egui_ctx);
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
+        app.state.lock().unwrap().added_to = setting("added_to").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
         app.attach_media(&cc.egui_ctx);
         let (state, slot, ctx) = (app.state.clone(), app.engine.clone(), cc.egui_ctx.clone());
         app.rt.spawn(async move {
@@ -155,20 +156,38 @@ impl App {
         });
     }
 
-    /// Appends a track to one of your playlists, then says so in the header.
-    fn add_to(&self, playlist: String, name: String, track: String) {
+    /// Draws the toast until it runs out: hovering holds it, a click closes it.
+    fn toast(&self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let mut s = self.state.lock().unwrap();
+        if s.notice.as_ref().is_some_and(|n| n.until <= now) { s.notice = None }
+        let Some(n) = &mut s.notice else { return };
+        let mut r = skin::toast(ctx, &ui::short_err(&n.text), n.error, (n.until - now).as_secs_f32() / n.life.as_secs_f32());
+        if n.error { r = r.on_hover_text(&n.text) } // the full error
+        if r.hovered() { n.until = n.until.max(now + Duration::from_secs(1)) }
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { s.notice = None }
+        ctx.request_repaint_after(Duration::from_millis(250)); // drains the bar, then clears it
+    }
+
+    /// Appends a track to one of your playlists, then says so in a toast.
+    fn add_to(&self, playlist: String, name: String, track: String, ctx: &egui::Context) {
         let Some(e) = self.engine.get() else { return };
-        let (state, web, http) = (self.state.clone(), e.web.clone(), e.http.clone());
+        let (state, web, http, ctx) = (self.state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
         self.rt.spawn(async move {
             let done = api::add_to_playlist(&web, &http, &playlist, &track).await;
             let mut s = state.lock().unwrap();
-            match done {
+            let order = match done {
                 Ok(()) => {
+                    s.remember_added_to(&playlist);
                     s.members.entry(playlist).or_default().insert(track);
-                    s.notice = Some(format!("Added to {name}"));
+                    s.say(format!("Added to {name}"), false);
+                    Some(s.added_to.join(","))
                 }
-                Err(err) => s.error = Some(err),
-            }
+                Err(err) => { s.say(format!("Not added to {name}: {err}"), true); None }
+            };
+            drop(s); // no disk writes under the lock the frame needs
+            if let Some(order) = order { set_setting("added_to", &order) }
+            ctx.request_repaint(); // nothing else redraws an idle window
         });
     }
 
@@ -183,15 +202,21 @@ impl App {
                 _ => Ok(()),
             };
             let mut s = state.lock().unwrap();
-            match made {
+            let order = match made {
                 Ok(pl) => {
                     s.members.entry(pl.id.clone()).or_default().extend(track.filter(|_| added.is_ok()));
+                    s.remember_added_to(&pl.id);
                     s.playlists.insert(0, pl);
-                    s.notice = Some(format!("Created {name}"));
-                    s.error = added.err();
+                    match added {
+                        Ok(()) => s.say(format!("Created {name}"), false),
+                        Err(err) => s.say(format!("Created {name}, but the song wasn't added: {err}"), true),
+                    }
+                    Some(s.added_to.join(","))
                 }
-                Err(err) => s.error = Some(err),
-            }
+                Err(err) => { s.say(format!("Couldn't create {name}: {err}"), true); None }
+            };
+            drop(s); // no disk writes under the lock the frame needs
+            if let Some(order) = order { set_setting("added_to", &order) }
             ctx.request_repaint(); // nothing else redraws an idle window
         });
     }
@@ -252,9 +277,10 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     {
         let mut s = state.lock().unwrap();
         if s.view.as_ref() == Some(&src) { return }
-        (s.view, s.loading, s.error, s.expected, s.notice, s.artist) = (Some(src.clone()), true, None, None, None, None);
+        (s.view, s.loading, s.error, s.expected, s.artist) = (Some(src.clone()), true, None, None, None);
         s.tracks.clear();
-        s.sort = Sort::saved(&src); // before any song arrives: pages are sorted as they land
+        // Before any song arrives: pages are sorted as they land. A radio keeps Spotify's mix order.
+        s.sort = if matches!(src, Source::Radio { .. }) { Sort::List } else { Sort::saved(&src) };
         if src == Source::Queue {
             s.loading = false; // drawn straight from the play queue
             return;
@@ -265,19 +291,25 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     let me = e.session().username();
     let foreign = match &src {
         Source::Playlist(id) => state.lock().unwrap().playlists.iter().any(|p| &p.id == id && !p.web_readable(&me)),
+        Source::Radio { .. } => true,
         _ => false,
     };
-    if let (true, Source::Playlist(id)) = (foreign, src.clone()) {
+    if foreign {
         let (session, sort) = (e.session(), state.lock().unwrap().sort);
         rt.spawn(async move {
-            let done = api::session_playlist(&session, &id, sort, |tracks, total| {
+            let id = match &src {
+                Source::Radio { track, .. } => api::radio_playlist(&session, track).await,
+                Source::Playlist(id) => Ok(id.clone()),
+                _ => unreachable!(),
+            };
+            let done = async { api::session_playlist(&session, &id?, sort, |tracks, total| {
                 let mut s = state.lock().unwrap();
                 if s.view.as_ref() != Some(&src) { return false } // user moved on
                 s.expected = Some(total);
                 s.add_tracks(tracks);
                 ctx.request_repaint();
                 true
-            }).await;
+            }).await }.await;
             {
                 let mut s = state.lock().unwrap();
                 if s.view.as_ref() == Some(&src) {
@@ -337,7 +369,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         let mut url = Some(match &src {
             Source::Search(q) => api::search_url(q),
             Source::Liked | Source::Playlist(_) => format!("{page_url}{}", if backwards { 1 } else { size }),
-            Source::Artist { .. } | Source::Album { .. } | Source::Queue => return,
+            Source::Artist { .. } | Source::Album { .. } | Source::Radio { .. } | Source::Queue => return,
         });
         let mut pages = 0;
         while let Some(u) = url {
@@ -491,6 +523,7 @@ impl eframe::App for App {
         let center = if self.big { ground(0, 0, 0, 0) } else { ground(half, edge, g, half) };
         egui::CentralPanel::default().frame(center).show(ctx, |ui| self.tracklist(ui));
         if self.help { help_overlay(ctx) }
+        self.toast(ctx);
         self.reveal = false;
         show_cursor(ctx);
 

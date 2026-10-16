@@ -511,6 +511,30 @@ pub struct Release {
     pub cover: Option<String>,
 }
 
+/// The playlist Spotify makes as a song's radio (similar songs), as the official client asks for it.
+pub async fn radio_playlist(session: &Session, track: &str) -> Result<String, String> {
+    let path = format!("/inspiredby-mix/v2/seed_to_playlist/spotify:track:{track}?response-format=json");
+    let bytes = patient(|| session.spclient().request(&reqwest::Method::GET, &path, None, None)).await.map_err(|e| format!("Song radio: {e}"))?;
+    radio_id(&bytes).ok_or_else(|| "Song radio: Spotify has no radio for this song".to_string())
+}
+
+/// `{"mediaItems": [{"uri": "spotify:playlist:<id>"}]}` → the id.
+fn radio_id(json: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Mix { media_items: Vec<Item> }
+    #[derive(Deserialize)]
+    struct Item { uri: String }
+    let mix: Mix = serde_json::from_slice(json).ok()?;
+    mix.media_items.into_iter().find_map(|i| i.uri.strip_prefix("spotify:playlist:").map(String::from))
+}
+
+#[test]
+fn reads_the_radio_playlist() {
+    assert_eq!(radio_id(br#"{"total": 1,"mediaItems": [{"uri": "spotify:playlist:37i9dQZF1E8NrW9Kj6hiiV"}]}"#).as_deref(), Some("37i9dQZF1E8NrW9Kj6hiiV"));
+    assert_eq!(radio_id(br#"{"total": 0,"mediaItems": []}"#), None);
+}
+
 /// An artist page: portrait, top songs (for the account's country), and every album / EP / single,
 /// newest first. Through the session: the Web API's artist endpoints are hit and miss for developer apps.
 pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<String>, Vec<Track>, Vec<Release>), String> {
@@ -579,3 +603,4 @@ fn refused_tells_a_refused_song_from_a_playable_one() {
         assert!(!refused(&session, "7GN6EEENu7xnl2lEipjN4X").await); // plays through its stand-in
     });
 }
+

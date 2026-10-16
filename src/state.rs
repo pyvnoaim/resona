@@ -28,6 +28,8 @@ pub enum Source {
     Queue,
     Artist { id: String, name: String },
     Album { id: String, name: String },
+    /// A song's radio: Spotify's mix of similar songs, read as the playlist it hands back.
+    Radio { track: String, name: String },
 }
 
 impl Source {
@@ -111,6 +113,14 @@ pub enum Cmd {
     Shuffle,
 }
 
+/// A toast: what happened (an error raw, shown through `short_err`), whether it went wrong, and when it goes away.
+pub struct Notice {
+    pub text: String,
+    pub error: bool,
+    pub until: Instant,
+    pub life: std::time::Duration,
+}
+
 #[derive(Default)]
 pub struct State {
     pub status: String,
@@ -140,10 +150,12 @@ pub struct State {
     pub dir: isize,
     /// Track ids in each of your own playlists (by playlist id), for the "Add to playlist" menu.
     pub members: HashMap<String, HashSet<String>>,
+    /// Playlists you last added songs to, latest first (`added_to` in settings): they lead "Add to playlist".
+    pub added_to: Vec<String>,
     /// Set once `members` has been asked for (the first time the menu opens).
     pub members_asked: bool,
-    /// A short confirmation for the header ("Added to …"); cleared when another list opens.
-    pub notice: Option<String>,
+    /// A short note shown as a toast ("Added to …"), until it runs out or is clicked away.
+    pub notice: Option<Notice>,
     /// Lyrics for one track id, for the big now-playing view.
     pub lyrics: Option<(String, Lyrics)>,
     pub shuffle: bool,
@@ -167,6 +179,24 @@ pub enum Lyrics {
 }
 
 impl State {
+    /// Shows `text` as a toast: 3 s, or 6 s for an error.
+    pub fn say(&mut self, text: String, error: bool) {
+        let life = std::time::Duration::from_secs(if error { 6 } else { 3 });
+        self.notice = Some(Notice { text, error, until: Instant::now() + life, life });
+    }
+
+    /// Puts `playlist` first in "Add to playlist".
+    pub fn remember_added_to(&mut self, playlist: &str) {
+        self.added_to.retain(|p| p != playlist);
+        self.added_to.insert(0, playlist.to_string());
+        self.added_to.truncate(100);
+    }
+
+    /// The toast, while it lasts.
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref().filter(|n| n.until > Instant::now())
+    }
+
     pub fn position(&self) -> u32 {
         let extra = self.since.map_or(0, |t| t.elapsed().as_millis() as u32);
         let dur = self.now.as_ref().map_or(1, |t| t.duration_ms.max(1));
@@ -277,6 +307,7 @@ impl State {
 
     /// "Play next" (front of the hand queue) or "Add to queue" (its end). With nothing playing, it just plays.
     pub fn enqueue(&mut self, player: &Player, t: api::Track, next: bool) {
+        self.say(format!("{} \u{201c}{}\u{201d}", if next { "Playing next:" } else { "Queued:" }, t.name), false);
         if self.now.is_none() {
             self.start(player, vec![t], None, None);
             return;
@@ -424,4 +455,11 @@ pub fn repeat_all_wraps_to_the_first_playable_track() {
     let skip: HashSet<String> = ["a".to_string()].into();
     assert_eq!(first_playable(&q, &skip, 1), Some(1));
     assert_eq!(first_playable(&q, &skip, -1), Some(2));
+}
+
+#[test]
+fn last_added_to_comes_first() {
+    let mut s = State::default();
+    for p in ["a", "b", "a", "c"] { s.remember_added_to(p) }
+    assert_eq!(s.added_to, ["c", "a", "b"]);
 }
