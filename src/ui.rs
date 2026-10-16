@@ -707,10 +707,10 @@ impl App {
             Some(Source::Search(q)) => (q.clone(), None),
             Some(Source::Queue) => ("Queue".to_string(), None),
             Some(Source::Artist { name, .. }) => (name.clone(), s.artist.as_ref().and_then(|a| a.portrait.clone())),
-            Some(Source::Album { name, .. }) => (name.clone(), s.tracks.first().and_then(|t| t.album.images.first()).map(|i| i.url.clone())),
-            Some(Source::Radio { name, .. }) => (format!("{name} Radio"), s.tracks.first().and_then(|t| t.album.images.first()).map(|i| i.url.clone())),
+            Some(Source::Album { name, .. }) => (name.clone(), s.tracks.first().and_then(|t| t.album.images.get(1).or(t.album.images.first())).map(|i| i.url.clone())),
+            Some(Source::Radio { name, .. }) => (format!("{name} Radio"), s.tracks.first().and_then(|t| t.album.images.get(1).or(t.album.images.first())).map(|i| i.url.clone())),
             Some(Source::Playlist(id)) => s.playlists.iter().find(|pl| &pl.id == id)
-                .map(|pl| (pl.name.clone(), pl.images.as_ref().and_then(|v| v.first()).map(|i| i.url.clone())))
+                .map(|pl| (pl.name.clone(), pl.images.as_ref().and_then(|v| v.get(1).or(v.first())).map(|i| i.url.clone())))
                 .unwrap_or_default(),
         };
         // What this list is called (window file, Japanese tag, header label), in each skin's voice.

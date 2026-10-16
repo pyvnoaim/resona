@@ -298,7 +298,7 @@ fn rootlist_playlists(list: &librespot::protocol::playlist4_external::SelectedLi
         let id = item.uri().strip_prefix("spotify:playlist:")?; // folders are start-group / end-group items
         // Covers: the sized links the official client uses, else the picture id as a CDN link.
         let a = &meta.attributes;
-        // Largest first, smallest last, like the Web API (the sidebar takes the last, the header the first).
+        // Largest first, smallest last, like the Web API (the sidebar takes the last, the header the second).
         let rank = |name: &str| ["xlarge", "large", "default", "small"].iter().position(|n| *n == name).unwrap_or(2);
         let mut sizes: Vec<_> = a.picture_size.iter().filter(|p| !p.url().is_empty()).collect();
         sizes.sort_by_key(|p| rank(p.target_name()));
