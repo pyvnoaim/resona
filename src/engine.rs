@@ -20,7 +20,7 @@ use librespot_oauth::OAuthClientBuilder;
 use crate::{api, settings::*, state::*};
 
 // ponytail: playback borrows librespot's public client ID (same as the official desktop app). The Web API
-// uses your own app (WEB_CLIENT_ID in api.rs) because this shared ID gets day-long rate-limit bans there.
+// uses your own app (`api::client_id`) because this shared ID gets day-long rate-limit bans there.
 pub const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 
 pub const REDIRECT: &str = "http://127.0.0.1:8898/login";
@@ -43,7 +43,7 @@ impl Engine {
     /// librespot never reconnects a session that lost its connection (a network drop, a missed keepalive, sleep):
     /// every load after that fails. A fresh session and player take over; the caller listens to the new events.
     async fn reconnect(&self) -> Result<PlayerEventChannel, String> {
-        let cache = Cache::new(Some(&std::env::home_dir().unwrap().join(".resona")), None, None, None).map_err(|e| e.to_string())?;
+        let cache = Cache::new(Some(&crate::settings::resona_dir()), None, None, None).map_err(|e| e.to_string())?;
         let creds = cache.credentials().ok_or("No saved sign-in")?;
         let (session, player) = start(cache, creds, &self.mixer).await?;
         let events = player.get_player_event_channel();
@@ -64,7 +64,7 @@ async fn start(cache: Cache, creds: Credentials, mixer: &SoftMixer) -> Result<(S
 
 pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Context) -> Result<(), String> {
     let set = |s: &str| { state.lock().unwrap().status = s.into(); ctx.request_repaint(); };
-    let dir = std::env::home_dir().unwrap().join(".resona");
+    let dir = crate::settings::resona_dir();
     // Saved reusable credentials, so the browser login only happens once.
     let cache = Cache::new(Some(&dir), None, None, None).map_err(|e| e.to_string())?;
     let creds = match cache.credentials() {

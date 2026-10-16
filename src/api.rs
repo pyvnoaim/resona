@@ -12,10 +12,34 @@ use librespot::{
 use librespot_oauth::{OAuthClient, OAuthClientBuilder};
 use serde::{Deserialize, de::DeserializeOwned};
 
-/// Your own app from developer.spotify.com, used only for the Web API (its redirect URI must match REDIRECT in main.rs).
-/// librespot's shared client ID works for playback but gets day-long rate-limit bans here.
-pub const WEB_CLIENT_ID: &str = "8abbb289e35c43b6977234abdd3520d3";
-const SCOPES: [&str; 7] = [
+/// The client ID of your own app from developer.spotify.com, used only for the Web API (its redirect URI must be
+/// REDIRECT in engine.rs): `RESONA_CLIENT_ID`, else `~/.resona/client_id`. Each person brings their own, set on the
+/// first launch. librespot's shared client ID works for playback but gets day-long rate-limit bans here.
+pub fn client_id(dir: &Path) -> Option<String> {
+    let valid = |s: String| Some(s.trim().to_string()).filter(|s| valid_client_id(s));
+    std::env::var("RESONA_CLIENT_ID").ok().and_then(valid)
+        .or_else(|| std::fs::read_to_string(dir.join("client_id")).ok().and_then(valid))
+}
+
+/// Spotify client IDs are 32 hex digits.
+pub fn valid_client_id(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Saves the client ID for every later launch.
+pub fn save_client_id(dir: &Path, id: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("client_id"), format!("{}\n", id.trim()))
+}
+
+#[test]
+fn checks_client_ids() {
+    assert!(valid_client_id("8abbb289e35c43b6977234abdd3520d3"));
+    assert!(!valid_client_id("8abbb289e35c43b6977234abdd3520d")); // one short
+    assert!(!valid_client_id("https://developer.spotify.com/x"));
+}
+const SCOPES: [&str; 8] = [
+    "user-follow-read",
     "user-library-read",
     "user-library-modify",
     "playlist-read-private",
@@ -34,10 +58,8 @@ pub struct WebAuth {
 
 impl WebAuth {
     pub fn new(dir: &Path, redirect: &str) -> Result<Self, String> {
-        if WEB_CLIENT_ID.is_empty() {
-            return Err("No Spotify app client ID set (WEB_CLIENT_ID in src/api.rs)".into());
-        }
-        let client = OAuthClientBuilder::new(WEB_CLIENT_ID, redirect, SCOPES.to_vec()).open_in_browser().build().map_err(|e| e.to_string())?;
+        let id = client_id(dir).ok_or("No Spotify app client ID: set it on the first-launch screen, or in ~/.resona/client_id")?;
+        let client = OAuthClientBuilder::new(&id, redirect, SCOPES.to_vec()).open_in_browser().build().map_err(|e| e.to_string())?;
         Ok(Self { client, refresh_file: dir.join("web_refresh_token"), token: Mutex::new(None) })
     }
 
@@ -476,7 +498,7 @@ async fn session_tracks(session: &Session, uris: &[SpotifyUri]) -> Vec<Track> {
         let mut set = tokio::task::JoinSet::new();
         for (i, u) in chunk.iter().cloned().enumerate() {
             let session = session.clone();
-            set.spawn(async move { (i, metadata::Track::get(&session, &u).await) });
+            set.spawn(async move { (i, patient(|| metadata::Track::get(&session, &u)).await) });
         }
         let mut got: Vec<Option<Track>> = (0..chunk.len()).map(|_| None).collect();
         while let Some(Ok((i, t))) = set.join_next().await {
@@ -565,6 +587,70 @@ pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<Strin
     releases.sort_by(|a, b| b.year.cmp(&a.year).then(a.name.cmp(&b.name)));
     releases.dedup_by(|a, b| a.id == b.id);
     Ok((portrait, top, releases))
+}
+
+/// The artists you follow (ids), through the Web API: the session has no such list.
+pub async fn followed_artists(auth: &WebAuth, http: &reqwest::Client) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct Following { artists: Page }
+    #[derive(Deserialize)]
+    struct Page { items: Vec<Item>, cursors: Option<Cursors> }
+    #[derive(Deserialize)]
+    struct Item { id: String }
+    #[derive(Deserialize)]
+    struct Cursors { after: Option<String> }
+    let (mut ids, mut after) = (Vec::new(), None::<String>);
+    loop {
+        let url = format!("me/following?type=artist&limit=50{}", after.map(|a| format!("&after={a}")).unwrap_or_default());
+        let page = get::<Following>(auth, http, &url).await.map_err(|e| format!("Followed artists: {e}"))?.artists;
+        let done = page.items.len() < 50;
+        ids.extend(page.items.into_iter().map(|i| i.id));
+        after = page.cursors.and_then(|c| c.after);
+        if done || after.is_none() { return Ok(ids) }
+    }
+}
+
+/// New releases by these artists (albums, EPs and singles out since `since`, ms since 1970), through the
+/// session. An artist's releases come newest first, so each list is read only up to the first older one:
+/// a few requests per artist. Songs go to `each` one release at a time, `added` set to the release day.
+pub async fn session_new_releases(session: &Session, artists: &[String], since: i64, mut each: impl FnMut(Vec<Track>) -> bool) {
+    let mut seen = std::collections::HashSet::new(); // a release shared by two followed artists comes once
+    for chunk in artists.chunks(8) {
+        let mut set = tokio::task::JoinSet::new();
+        for id in chunk {
+            let (session, id) = (session.clone(), id.clone());
+            set.spawn(async move { fresh_releases(&session, &id, since).await });
+        }
+        while let Some(done) = set.join_next().await {
+            let Ok(albums) = done else { continue }; // one artist failing keeps the others
+            for a in albums {
+                if !seen.insert(a.id.clone()) { continue }
+                let day = a.date.as_timestamp_ms();
+                let uris: Vec<SpotifyUri> = a.tracks().cloned().collect();
+                let songs = session_tracks(session, &uris).await.into_iter().map(|t| Track { added: day, ..t }).collect();
+                if !each(songs) { return }
+            }
+        }
+    }
+}
+
+/// One artist's albums and singles out since `since`.
+async fn fresh_releases(session: &Session, id: &str, since: i64) -> Vec<metadata::Album> {
+    let Ok(uri) = SpotifyUri::from_uri(&format!("spotify:artist:{id}")) else { return vec![] };
+    let Ok(artist) = patient(|| metadata::Artist::get(session, &uri)).await else { return vec![] };
+    let mut out = vec![];
+    // ponytail: trusts Spotify's newest-first order of each list (true in every artist checked); if it ever
+    // isn't, read every release and filter, at a few times the requests.
+    for list in [artist.albums_current().cloned().collect::<Vec<_>>(), artist.singles_current().cloned().collect()] {
+        for u in list {
+            match patient(|| metadata::Album::get(session, &u)).await {
+                Ok(a) if a.date.as_timestamp_ms() >= since => out.push(a),
+                Ok(_) => break, // older than `since`: the rest of this list is older still
+                Err(_) => continue, // unreadable just now: skip it, not the artist's other new ones
+            }
+        }
+    }
+    out
 }
 
 /// An album's tracks, in order, through the session.

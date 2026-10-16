@@ -15,7 +15,7 @@ use eframe::egui;
 use librespot::playback::mixer::Mixer;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{command, engine::*, open_list, settings::*, state::*, toggle_like, ui::short_err};
+use crate::{api, command, engine::*, open_list, settings::*, state::*, toggle_like, ui::short_err};
 
 type C = (u8, u8, u8);
 const BG: C = (0x1a, 0x1d, 0x23);
@@ -72,6 +72,16 @@ struct Tui {
 }
 
 pub fn run() {
+    // First launch: ask for the client ID here, before the screen goes full-screen.
+    let dir = resona_dir();
+    if api::client_id(&dir).is_none() {
+        println!("Resona needs your own Spotify app (free): create one at https://developer.spotify.com/dashboard,");
+        println!("add the Redirect URI {}, and paste its Client ID here:", crate::engine::REDIRECT);
+        let mut id = String::new();
+        let _ = std::io::stdin().read_line(&mut id);
+        if !api::valid_client_id(id.trim()) { return eprintln!("That doesn't look like a client ID: it's 32 letters and digits.") }
+        if let Err(e) = api::save_client_id(&dir, &id) { return eprintln!("Couldn't save it: {e}") }
+    }
     let _term = match Term::enter() {
         Ok(t) => t,
         Err(e) => return eprintln!("resona cli needs a terminal: {e}"),
@@ -552,9 +562,9 @@ fn side(c: C, inner: String) -> String {
     format!("{}{inner}{}", Seg::new(2, None).put("│ ", c).done(), Seg::new(2, None).put(" │", c).done())
 }
 
-/// Liked Songs, then every playlist: what the left pane lists.
+/// Liked Songs, New releases, then every playlist: what the left pane lists.
 fn lists_of(s: &State) -> Vec<(Source, String)> {
-    std::iter::once((Source::Liked, "Liked Songs".to_string()))
+    [(Source::Liked, "Liked Songs".to_string()), (Source::NewReleases, "New releases".to_string())].into_iter()
         .chain(s.playlists.iter().map(|p| (Source::Playlist(p.id.clone()), p.name.clone())))
         .collect()
 }

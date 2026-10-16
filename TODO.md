@@ -14,17 +14,25 @@
 - [ ] A followed playlist that wasn't loaded (partial library) can be routed to the Web API and fail (`open_list`).
 - [ ] Two expiring Web API calls can both refresh the token at once (`WebAuth::token`). Harmless today.
 - [ ] `block` (pulled in by `souvlaki` for media keys) has a future-incompatibility warning from rustc.
+- [ ] New releases asks the Web API for every followed artist and reads them all again on each open; with
+      hundreds of artists the first songs take a while. Cache the artist list (and each artist's newest release)
+      for the session if it gets slow.
+- [ ] New releases leaves out songs an artist only features on and compilations (`albums_current` and
+      `singles_current` only).
+- [ ] "Add to playlist" puts first the lists you last added to from Resona (`added_to`); adds made in other
+      Spotify clients don't count.
+- [ ] A song radio is not kept: it isn't in the sidebar and isn't reopened at launch (`Source::Radio` has no key).
 
 ## Ideas
 
-- [ ] Rename the Spotify developer app to "Resona" (dashboard, by hand): its name shows on the sign-in page.
-
 - [ ] Spotify Connect (control from the phone, hand playback over); librespot supports it.
 - [ ] Filter box for the open playlist (search only covers all of Spotify right now).
-- [ ] Clicking the artist or cover in the focus view could open the artist / album page.
 - [ ] Click the `>` prompt to focus the search box (only the text area takes clicks now).
 - [ ] Measure CPU of the release build while playing (idle is 0%, ~106 MB). The CLI: ~2% playing, ~34 MB.
 - [ ] Try `GET /me/library/contains` for hearts on visible songs only (would drop the first-run full read).
 - [ ] Characters the skin fonts lack (`⁻ ˢ ☆` in some titles) show as boxes in the window; a macOS fallback font
       (Arial Unicode, ~23 MB in memory) would cover them.
 - [ ] Plays through librespot don't reach Spotify's history / Wrapped; Last.fm scrobbling would give own stats.
+- [ ] Keep New releases as a real Spotify playlist too (add the new songs, drop ones older than two weeks), so it
+      shows on the phone.
+- [ ] Release Radar: Spotify's own weekly list; readable through the session once its playlist id is known.

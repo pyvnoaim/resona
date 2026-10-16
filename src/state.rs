@@ -28,6 +28,8 @@ pub enum Source {
     Queue,
     Artist { id: String, name: String },
     Album { id: String, name: String },
+    /// Songs from the last two weeks' releases by the artists you follow.
+    NewReleases,
     /// A song's radio: Spotify's mix of similar songs, read as the playlist it hands back.
     Radio { track: String, name: String },
 }
@@ -130,6 +132,8 @@ pub struct State {
     pub view: Option<Source>,
     pub tracks: Vec<api::Track>,
     pub loading: bool,
+    /// Counts list opens, so a slow load can tell it was replaced by a newer one of the same list.
+    pub load_id: u64,
     /// How many tracks the open list will have, once Spotify says.
     pub expected: Option<usize>,
     pub queue: Vec<api::Track>,

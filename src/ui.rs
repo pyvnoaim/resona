@@ -425,6 +425,56 @@ pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
     });
 }
 
+/// First launch: how to make your own Spotify app, and a field for its client ID. True when Save is pressed
+/// with a valid one.
+pub fn setup(ui: &mut egui::Ui, typed: &mut String, redirect: &str, error: Option<&str>) -> bool {
+    let (p, s) = (skin::pal(ui.ctx()), skin::skin(ui.ctx()));
+    let caps = s.blocky();
+    let size = match s { Skin::Wired => 52.0, Skin::Swiss => 44.0 };
+    let mut save = false;
+    ui.add_space((ui.available_height() / 2.0 - 220.0).max(24.0));
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() / 2.0 - 300.0).max(24.0));
+        ui.vertical(|ui| {
+            ui.set_max_width(600.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.label(RichText::new("resona").font(skin::num(if caps { 22.0 } else { 14.0 })).color(p.dim));
+            ui.add(egui::Label::new(RichText::new("Connect your Spotify app").font(skin::title(size)).color(p.text)).wrap());
+            ui.add(egui::Label::new(RichText::new("Resona plays through your Spotify Premium account, and reads your library through a small app of your own on Spotify's developer site. It's free and takes two minutes.").size(14.0).color(p.dim)).wrap());
+            ui.add_space(6.0);
+            let step = |ui: &mut egui::Ui, n: u32, text: &str| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{n}")).font(skin::title(16.0)).color(p.accent));
+                    ui.label(RichText::new(text).size(14.0).color(p.text));
+                });
+            };
+            step(ui, 1, "Open the dashboard and create an app (any name; tick Web API).");
+            ui.hyperlink_to(RichText::new("developer.spotify.com/dashboard").size(14.0).color(p.accent), "https://developer.spotify.com/dashboard");
+            step(ui, 2, "Add this Redirect URI to the app, exactly:");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(redirect).font(FontId::monospace(14.0)).color(p.text));
+                if skin::action_button(ui, if caps { "COPY" } else { "Copy" }, false).clicked() { ui.ctx().copy_text(redirect.into()) }
+            });
+            step(ui, 3, "Paste the app's Client ID here (no secret needed):");
+            let ok = api::valid_client_id(typed.trim());
+            ui.horizontal(|ui| {
+                let field = ui.add(egui::TextEdit::singleline(typed).hint_text("32 letters and digits").desired_width(340.0).font(FontId::monospace(14.0)));
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let button = ui.add_enabled_ui(ok, |ui| skin::action_button(ui, if caps { "CONNECT" } else { "Connect" }, true)).inner;
+                save = ok && (button.clicked() || enter);
+            });
+            if !typed.trim().is_empty() && !ok {
+                ui.label(RichText::new("That doesn't look like a client ID: it's 32 letters and digits.").size(12.0).color(p.accent));
+            }
+            if let Some(e) = error {
+                ui.add(egui::Label::new(RichText::new(short_err(e)).size(12.0).color(p.accent)).wrap()).on_hover_text(e);
+            }
+            ui.add(egui::Label::new(RichText::new("Your browser then opens twice to sign in: once for playback, once for your app. The ID is kept in ~/.resona/client_id.").size(12.0).color(p.dim)).wrap());
+        });
+    });
+    save
+}
+
 /// Before a playlist is open: the connect steps (with the failed one, if any), then a hint once we're in.
 pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
     let (p, s) = (skin::pal(ui.ctx()), skin::skin(ui.ctx()));
@@ -482,7 +532,7 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
 /// The sidebar's rows, top to bottom. Queue only shows up while you've queued songs by hand (or are looking at it).
 pub fn side_lists(s: &State) -> Vec<Source> {
     let queue = (s.queued > 0 || s.view == Some(Source::Queue)).then_some(Source::Queue);
-    std::iter::once(Source::Liked).chain(queue).chain(s.playlists.iter().map(|p| Source::Playlist(p.id.clone()))).collect()
+    [Source::Liked, Source::NewReleases].into_iter().chain(queue).chain(s.playlists.iter().map(|p| Source::Playlist(p.id.clone()))).collect()
 }
 
 /// The pointer moved (or the wheel moved the rows under it): the row it is over takes the cursor.
@@ -542,6 +592,7 @@ impl App {
                                 ui.add(egui::Label::new(RichText::new(name).size(14.0).color(ink)).truncate());
                                 let sub = match (&src, owner.is_empty()) {
                                     (Source::Queue, _) => "up next".to_string(),
+                                    (Source::NewReleases, _) => "followed artists · 2 weeks".to_string(),
                                     (_, true) => "playlist".to_string(),
                                     _ => format!("playlist · {owner}"),
                                 };
@@ -574,13 +625,14 @@ impl App {
                     let liked_name = "Liked Songs";
                     row(ui, 0, Source::Liked, None, liked_name, "");
                     // The same rows, in the same order, as `side_lists`.
+                    row(ui, 1, Source::NewReleases, None, "New releases", "");
                     if s.queued > 0 || s.view == Some(Source::Queue) {
-                        row(ui, 1, Source::Queue, None, "Queue", "");
+                        row(ui, 2, Source::Queue, None, "Queue", "");
                     }
                     for (i, pl) in s.playlists.iter().enumerate() {
                         let img = pl.images.as_ref().and_then(|v| v.last()).map(|i| i.url.as_str());
                         let owner = pl.owner.as_ref().and_then(|o| o.display_name.as_deref()).unwrap_or("");
-                        row(ui, i + 2, Source::Playlist(pl.id.clone()), img, &pl.name, owner);
+                        row(ui, i + 3, Source::Playlist(pl.id.clone()), img, &pl.name, owner);
                     }
                     ui.add_space(8.0);
                     let r = skin::text_field(ui, "new-list", "new playlist_", "New playlist", &mut self.new_list);
@@ -626,6 +678,7 @@ impl App {
         let (title, img) = match &s.view {
             None => (String::new(), None),
             Some(Source::Liked) => ("Liked Songs".to_string(), None),
+            Some(Source::NewReleases) => ("New releases".to_string(), None),
             Some(Source::Search(q)) => (q.clone(), None),
             Some(Source::Queue) => ("Queue".to_string(), None),
             Some(Source::Artist { name, .. }) => (name.clone(), s.artist.as_ref().and_then(|a| a.portrait.clone())),
@@ -643,6 +696,7 @@ impl App {
             Some(Source::Artist { .. }) => ("artist", "art", "アーティスト"),
             Some(Source::Album { .. }) => ("album", "alb", "アルバム"),
             Some(Source::Radio { .. }) => ("radio", "rad", "ラジオ"),
+            Some(Source::NewReleases) => ("new releases", "new", "新着"),
             Some(_) => ("playlist", "pls", "プレイリスト"),
         };
         let file = match &s.view {
@@ -1129,9 +1183,9 @@ impl App {
 #[test]
 fn sidebar_lists_the_queue_only_while_it_shows() {
     let mut s = State::default();
-    assert!(side_lists(&s) == [Source::Liked]);
+    assert!(side_lists(&s) == [Source::Liked, Source::NewReleases]);
     s.queued = 1;
-    assert!(side_lists(&s) == [Source::Liked, Source::Queue]);
+    assert!(side_lists(&s) == [Source::Liked, Source::NewReleases, Source::Queue]);
 }
 
 #[test]

@@ -6,8 +6,13 @@ use eframe::egui;
 
 use crate::skin::{self, Skin};
 
+/// Where Resona keeps everything: `~/.resona`.
+pub fn resona_dir() -> std::path::PathBuf {
+    std::env::home_dir().unwrap().join(".resona")
+}
+
 pub fn settings_path() -> std::path::PathBuf {
-    std::env::home_dir().unwrap().join(".resona").join("settings")
+    resona_dir().join("settings")
 }
 
 /// One "key=value" setting from ~/.resona/settings.
@@ -43,7 +48,7 @@ pub fn load_settings(ctx: &egui::Context) {
 }
 
 fn ids_path(name: &str) -> std::path::PathBuf {
-    std::env::home_dir().unwrap().join(".resona").join(name)
+    resona_dir().join(name)
 }
 
 /// Track ids, one per line in ~/.resona/<name>; None when there is no such file.

@@ -64,6 +64,8 @@ struct App {
     media: Option<souvlaki::MediaControls>,
     media_rx: std::sync::mpsc::Receiver<souvlaki::MediaControlEvent>,
     media_sent: (Option<String>, bool, u32),
+    /// First launch without a client ID: what's typed into the setup screen. Nothing connects until it's saved.
+    setup: Option<String>,
     /// The macOS menu bar (kept alive here) and its clicks.
     menu: Option<muda::Menu>,
     menu_rx: std::sync::mpsc::Receiver<muda::MenuEvent>,
@@ -99,20 +101,29 @@ impl App {
             media_sent: (None, false, 0),
             menu: None,
             menu_rx: std::sync::mpsc::channel().1,
+            setup: None,
         };
         app.attach_menu(&cc.egui_ctx);
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
         app.state.lock().unwrap().added_to = setting("added_to").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
         app.attach_media(&cc.egui_ctx);
-        let (state, slot, ctx) = (app.state.clone(), app.engine.clone(), cc.egui_ctx.clone());
-        app.rt.spawn(async move {
+        match api::client_id(&resona_dir()) {
+            Some(_) => app.start(&cc.egui_ctx),
+            None => app.setup = Some(String::new()),
+        }
+        app
+    }
+
+    /// Signs in and connects, in the background.
+    fn start(&self, ctx: &egui::Context) {
+        let (state, slot, ctx) = (self.state.clone(), self.engine.clone(), ctx.clone());
+        self.rt.spawn(async move {
             if let Err(e) = connect(state.clone(), slot, ctx.clone()).await {
                 state.lock().unwrap().error = Some(e);
                 ctx.request_repaint();
             }
         });
-        app
     }
 
     fn open(&mut self, src: Source, ctx: &egui::Context) {
@@ -278,6 +289,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         let mut s = state.lock().unwrap();
         if s.view.as_ref() == Some(&src) { return }
         (s.view, s.loading, s.error, s.expected, s.artist) = (Some(src.clone()), true, None, None, None);
+        s.load_id += 1;
         s.tracks.clear();
         // Before any song arrives: pages are sorted as they land. A radio keeps Spotify's mix order.
         s.sort = if matches!(src, Source::Radio { .. }) { Sort::List } else { Sort::saved(&src) };
@@ -295,7 +307,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         _ => false,
     };
     if foreign {
-        let (session, sort) = (e.session(), state.lock().unwrap().sort);
+        let (session, sort, me) = { let s = state.lock().unwrap(); (e.session(), s.sort, s.load_id) };
         rt.spawn(async move {
             let id = match &src {
                 Source::Radio { track, .. } => api::radio_playlist(&session, track).await,
@@ -304,7 +316,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             };
             let done = async { api::session_playlist(&session, &id?, sort, |tracks, total| {
                 let mut s = state.lock().unwrap();
-                if s.view.as_ref() != Some(&src) { return false } // user moved on
+                if s.load_id != me { return false } // user moved on, or opened it again
                 s.expected = Some(total);
                 s.add_tracks(tracks);
                 ctx.request_repaint();
@@ -312,10 +324,35 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             }).await }.await;
             {
                 let mut s = state.lock().unwrap();
-                if s.view.as_ref() == Some(&src) {
+                if s.load_id == me {
                     (s.loading, s.error) = (false, done.err());
                 }
             }
+            ctx.request_repaint();
+        });
+        return;
+    }
+    if src == Source::NewReleases {
+        // Who you follow (Web API), then each one's last two weeks (session), streamed in release by release.
+        let (session, me) = (e.session(), state.lock().unwrap().load_id);
+        rt.spawn(async move {
+            let since = (std::time::SystemTime::now() - Duration::from_secs(14 * 86_400)).duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+            let done = match api::followed_artists(&web, &http).await {
+                Ok(artists) => {
+                    api::session_new_releases(&session, &artists, since, |tracks| {
+                        let mut s = state.lock().unwrap();
+                        if s.load_id != me { return false } // user moved on, or opened it again
+                        s.add_tracks(tracks);
+                        ctx.request_repaint();
+                        true
+                    }).await;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            };
+            let mut s = state.lock().unwrap();
+            if s.load_id == me { (s.loading, s.error) = (false, done.err()) }
+            drop(s);
             ctx.request_repaint();
         });
         return;
@@ -369,7 +406,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         let mut url = Some(match &src {
             Source::Search(q) => api::search_url(q),
             Source::Liked | Source::Playlist(_) => format!("{page_url}{}", if backwards { 1 } else { size }),
-            Source::Artist { .. } | Source::Album { .. } | Source::Radio { .. } | Source::Queue => return,
+            Source::Artist { .. } | Source::Album { .. } | Source::Radio { .. } | Source::NewReleases | Source::Queue => return,
         });
         let mut pages = 0;
         while let Some(u) = url {
@@ -500,6 +537,19 @@ impl eframe::App for App {
         self.keys(ctx);
         self.window_title(ctx);
         self.bars_shown.set(false);
+        if let Some(typed) = &mut self.setup {
+            let ground = egui::Frame::new().fill(skin::pal(ctx).ground);
+            let error = self.state.lock().unwrap().error.clone();
+            let save = egui::CentralPanel::default().frame(ground).show(ctx, |ui| ui::setup(ui, typed, engine::REDIRECT, error.as_deref())).inner;
+            if save {
+                match api::save_client_id(&resona_dir(), typed) {
+                    Ok(()) => { self.setup = None; self.start(ctx) }
+                    Err(e) => self.state.lock().unwrap().error = Some(format!("Couldn't save the client ID: {e}")),
+                }
+            }
+            show_cursor(ctx);
+            return;
+        }
         // Windows sit on the bare ground: `gap` between them, `edge` to the window border so square
         // frames clear macOS's rounded corners. Swiss has neither: its areas run edge to edge.
         let l = skin::look(ctx);

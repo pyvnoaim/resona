@@ -18,6 +18,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 
 | file | what |
 |---|---|
+| `client_id` | the client ID of the user's own Spotify developer app (asked for on first launch; `RESONA_CLIENT_ID` overrides) |
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
 | `settings` | `key=value`: skin, theme, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
@@ -47,8 +48,9 @@ font's default instance.
 ## Things that are not obvious
 
 - **Two client IDs.** Playback signs in with librespot's shared client ID (`CLIENT_ID` in engine.rs). The Web API
-  uses the user's own developer app (`WEB_CLIENT_ID` in api.rs): the shared ID gets 24h rate-limit bans there,
-  and its old keymaster token endpoint answers 503. Both sign-ins use `REDIRECT` (`http://127.0.0.1:8898/login`),
+  uses each user's own developer app (`api::client_id`, from `~/.resona/client_id`): the shared ID gets 24h
+  rate-limit bans there, and its old keymaster token endpoint answers 503. No ID is built in: without one the
+  window shows a setup screen (`ui::setup`) and the CLI asks in the terminal; nothing connects until it's saved. Both sign-ins use `REDIRECT` (`http://127.0.0.1:8898/login`),
   which must be listed in the developer app's settings. No client secret is needed (PKCE). Adding a Web API
   scope to `SCOPES` forces one new browser sign-in.
 - **The Web API is restricted for developer apps**, so several things go through the librespot session instead:
@@ -90,9 +92,15 @@ font's default instance.
 - **Song radio** (`Source::Radio`): the session's `inspiredby-mix` endpoint turns a song into Spotify's radio
   playlist (`api::radio_playlist`), which then opens like any session playlist. The Web API's recommendations are
   closed to developer apps.
+- **New releases** (`Source::NewReleases`): followed artists from the Web API (`GET /me/following`, scope
+  `user-follow-read`; the session has no such list), then each artist's albums and singles through the session,
+  read newest first only until one is older than two weeks (`session_new_releases`). `Track.added` is the release day.
+  It has no `key`, so it's never the list reopened at launch: that would be a burst at startup.
 - **Search** asks for pages of 10 and stops at 5 pages; newer developer apps get a lower page-size cap.
 - **Repaints:** nothing redraws when idle; 4 fps while playing, 20 fps while the equaliser bars or meter are on
   screen, ~16 fps while a list is loading.
+- **Toasts:** `State::say` shows a short note above the player bar (3 s, errors 6 s), one at a time; `enqueue`
+  announces itself. The CLI shows the same note in its status line while it lasts.
 - Errors are stored raw in `State.error` (or an error toast's `Notice`) and shown through `short_err()` (full text on hover).
 
 ## Conventions
