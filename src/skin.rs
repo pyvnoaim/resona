@@ -33,6 +33,7 @@ impl Skin {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Pal {
     pub ground: Color32,
     pub panel: Color32,
@@ -53,6 +54,86 @@ pub struct Pal {
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
+}
+
+/// The accent colour. Red is each skin's own; the others swap it in, one shade for dark themes, one for light.
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+pub enum Accent {
+    #[default]
+    Red,
+    Blue,
+    Teal,
+    Violet,
+    Amber,
+    Pink,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 6] = [Accent::Red, Accent::Blue, Accent::Teal, Accent::Violet, Accent::Amber, Accent::Pink];
+
+    /// (dark theme, light theme); None keeps the skin's red.
+    fn shades(self) -> Option<(Color32, Color32)> {
+        match self {
+            Accent::Red => None,
+            Accent::Blue => Some((rgb(70, 140, 255), rgb(22, 82, 204))),
+            Accent::Teal => Some((rgb(40, 200, 200), rgb(0, 122, 132))), // not green: the online dot is
+            Accent::Violet => Some((rgb(165, 110, 255), rgb(110, 52, 206))),
+            Accent::Amber => Some((rgb(255, 170, 30), rgb(176, 104, 0))),
+            Accent::Pink => Some((rgb(255, 84, 170), rgb(196, 26, 116))),
+        }
+    }
+}
+
+/// `base` with its accent swapped for `c`, and the text on it black or white, whichever reads.
+fn tinted(base: &Pal, c: Color32) -> Pal {
+    let lum = (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / 255.0;
+    let on = if lum > 0.55 { rgb(0, 0, 0) } else { rgb(250, 248, 242) };
+    let swap = |f: Color32| if f == base.accent { c } else if f == base.on_accent { on } else { f };
+    Pal { accent: c, on_accent: on, selected: swap(base.selected), on_selected: swap(base.on_selected), ..*base }
+}
+
+/// The app icon, `n`×`n` RGBA: a pixel speaker with sound waves, in `ink`, on a near-black rounded square.
+/// Drawn here once for the Dock (main.rs) and for the bundle's icon file (`resona icon`, used by bundle.sh).
+pub fn app_icon(n: usize, ink: Color32) -> Vec<u8> {
+    const ART: [&str; 13] = [
+        "......X........", ".....XX........", "....XXX...X....", "XXXXXXX....X...", "XXXXXXX.X...X..",
+        "XXXXXXX..X..X..", "XXXXXXX..X..X..", "XXXXXXX..X..X..", "XXXXXXX.X...X..", "XXXXXXX....X...",
+        "....XXX...X....", ".....XX........", "......X........",
+    ];
+    let k = n as f32 / 1024.0; // drawn at 1024, scaled
+    let (cell, pad, r) = (44.0 * k, 100.0 * k, 180.0 * k);
+    let (ox, oy) = ((n as f32 - cell * 15.0) / 2.0 + cell, (n as f32 - cell * 13.0) / 2.0);
+    let panel = [11, 10, 11, 255];
+    let mut out = Vec::with_capacity(n * n * 4);
+    for y in 0..n {
+        for x in 0..n {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (cx, cy) = (fx.clamp(pad + r, n as f32 - pad - r), fy.clamp(pad + r, n as f32 - pad - r));
+            let inside = (pad..n as f32 - pad).contains(&fx) && (pad..n as f32 - pad).contains(&fy) && (fx - cx).powi(2) + (fy - cy).powi(2) <= r * r;
+            let lit = fx >= ox && fy >= oy && ART.get(((fy - oy) / cell) as usize).and_then(|row| row.as_bytes().get(((fx - ox) / cell) as usize)) == Some(&b'X');
+            out.extend(match (inside, lit) { (false, _) => [0; 4], (true, true) => [ink.r(), ink.g(), ink.b(), 255], (true, false) => panel });
+        }
+    }
+    out
+}
+
+#[test]
+fn icon_has_the_speaker_in_the_accent() {
+    let ink = rgb(70, 140, 255);
+    let px = app_icon(64, ink);
+    let at = |x: usize, y: usize| &px[(y * 64 + x) * 4..][..4];
+    assert_eq!(at(0, 0), [0, 0, 0, 0]); // outside the rounded square
+    assert_eq!(at(32, 4), [0, 0, 0, 0]); // above it
+    assert_eq!(at(20, 32), [70, 140, 255, 255]); // the speaker's body
+    assert_eq!(at(35, 32), [11, 10, 11, 255]); // between speaker and waves
+}
+
+#[test]
+fn accents_keep_text_readable() {
+    let amber = tinted(&WIRED_DARK, rgb(255, 170, 30));
+    assert_eq!((amber.accent, amber.selected, amber.on_accent, amber.on_selected), (rgb(255, 170, 30), rgb(255, 170, 30), rgb(0, 0, 0), rgb(0, 0, 0)));
+    let blue = tinted(&SWISS_LIGHT, rgb(22, 82, 204)); // Swiss marks the playing row with accent text on paper
+    assert_eq!((blue.selected, blue.on_selected, blue.on_accent), (SWISS_LIGHT.selected, rgb(22, 82, 204), rgb(250, 248, 242)));
 }
 
 const WIRED_DARK: Pal = Pal {
@@ -170,15 +251,48 @@ pub fn skin(ctx: &egui::Context) -> Skin {
 }
 
 pub fn look(ctx: &egui::Context) -> &'static Look {
-    match skin(ctx) {
+    look_of(skin(ctx))
+}
+
+fn look_of(skin: Skin) -> &'static Look {
+    match skin {
         Skin::Wired => &WIRED,
         Skin::Swiss => &SWISS,
     }
 }
 
+pub fn accent(ctx: &egui::Context) -> Accent {
+    ctx.data(|d| d.get_temp(egui::Id::new("accent"))).unwrap_or_default()
+}
+
+/// Switches the accent colour; takes effect next frame.
+pub fn set_accent(ctx: &egui::Context, a: Accent) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("accent"), a));
+    visuals(ctx, skin(ctx));
+}
+
 pub fn pal(ctx: &egui::Context) -> &'static Pal {
-    let l = look(ctx);
-    if ctx.theme() == egui::Theme::Light { &l.light } else { &l.dark }
+    pal_of(skin(ctx), ctx.theme(), accent(ctx))
+}
+
+/// Every skin × theme × accent palette, made once.
+pub fn pal_of(skin: Skin, theme: egui::Theme, a: Accent) -> &'static Pal {
+    static ALL: std::sync::OnceLock<Vec<Pal>> = std::sync::OnceLock::new();
+    let all = ALL.get_or_init(|| {
+        let mut v = Vec::new();
+        for s in Skin::ALL {
+            let l = look_of(s);
+            for (light, base) in [(false, &l.dark), (true, &l.light)] {
+                for a in Accent::ALL {
+                    v.push(match a.shades() { None => *base, Some((d, li)) => tinted(base, if light { li } else { d }) });
+                }
+            }
+        }
+        v
+    });
+    let s = Skin::ALL.iter().position(|x| *x == skin).unwrap_or(0);
+    let t = usize::from(theme == egui::Theme::Light);
+    &all[(s * 2 + t) * Accent::ALL.len() + Accent::ALL.iter().position(|x| *x == a).unwrap_or(0)]
 }
 
 /// Big titles: VT323 / Archivo ExtraBold.
@@ -194,8 +308,14 @@ pub fn num(size: f32) -> FontId {
 /// Switches the whole app to `skin`: palettes, square widgets and fonts. Takes effect next frame.
 pub fn apply(ctx: &egui::Context, skin: Skin) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("skin"), skin));
-    let l = look(ctx);
-    for (theme, p) in [(egui::Theme::Dark, &l.dark), (egui::Theme::Light, &l.light)] {
+    visuals(ctx, skin);
+    ctx.set_fonts(fonts(skin));
+}
+
+/// egui's own colours and shapes from the palettes (all an accent change needs: fonts stay).
+fn visuals(ctx: &egui::Context, skin: Skin) {
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        let p = pal_of(skin, theme, accent(ctx));
         let mut v = theme.default_visuals();
         v.panel_fill = p.ground;
         v.window_fill = p.panel;
@@ -218,7 +338,6 @@ pub fn apply(ctx: &egui::Context, skin: Skin) {
         s.spacing.scroll = egui::style::ScrollStyle::solid();
         s.interaction.selectable_labels = false; // so clicks reach the rows
     });
-    ctx.set_fonts(fonts(skin));
 }
 
 /// All bundled fonts are OFL (licenses in assets/).
@@ -275,6 +394,7 @@ const QUEUE: Icon = (9.0, 7.0, &[[0.0, 0.0, 1.0, 3.0], [1.0, 1.0, 1.0, 1.0], [3.
 const LOUPE: Icon = (9.0, 9.0, &[[2.0, 0.0, 3.0, 1.0], [1.0, 1.0, 1.0, 1.0], [5.0, 1.0, 1.0, 1.0], [0.0, 2.0, 1.0, 3.0], [6.0, 2.0, 1.0, 3.0], [1.0, 5.0, 1.0, 1.0], [5.0, 5.0, 1.0, 1.0], [2.0, 6.0, 3.0, 1.0], [6.0, 6.0, 1.0, 1.0], [7.0, 7.0, 1.0, 1.0], [8.0, 8.0, 1.0, 1.0], [6.0, 7.0, 1.0, 1.0], [7.0, 8.0, 1.0, 1.0]]);
 const NOTE: Icon = (7.0, 8.0, &[[2.0, 0.0, 1.0, 6.0], [3.0, 0.0, 2.0, 1.0], [5.0, 1.0, 1.0, 2.0], [0.0, 5.0, 3.0, 3.0]]);
 const MENU: Icon = (7.0, 7.0, &[[0.0, 0.0, 7.0, 1.0], [0.0, 3.0, 7.0, 1.0], [0.0, 6.0, 7.0, 1.0]]);
+const SPARKLE: Icon = (9.0, 9.0, &[[4.0, 0.0, 1.0, 2.0], [3.0, 2.0, 3.0, 1.0], [2.0, 3.0, 5.0, 1.0], [0.0, 4.0, 9.0, 1.0], [2.0, 5.0, 5.0, 1.0], [3.0, 6.0, 3.0, 1.0], [4.0, 7.0, 1.0, 2.0]]);
 const HEART: Icon = (7.0, 6.0, &[[1.0, 0.0, 2.0, 1.0], [4.0, 0.0, 2.0, 1.0], [0.0, 1.0, 7.0, 2.0], [1.0, 3.0, 5.0, 1.0], [2.0, 4.0, 3.0, 1.0], [3.0, 5.0, 1.0, 1.0]]);
 
 /// Draws `icon` centred on `center`, `scale` px per cell.
@@ -426,6 +546,8 @@ pub enum Stamp<'a> {
     Queue,
     /// Search results: a magnifying glass.
     Search,
+    /// New releases: a four-point sparkle.
+    New,
     Text(&'a str),
     None,
 }
@@ -464,13 +586,25 @@ pub fn cover(ui: &mut egui::Ui, url: Option<&str>, size: f32, stamp: Stamp, big:
             painter.circle_stroke(c, r, st);
             painter.line_segment([c + Vec2::splat(r * 0.72), c + Vec2::splat(r * 1.75)], st);
         }
+        (Skin::Wired, Stamp::New) => {
+            painter.rect(rect, 0.0, p.surface, Stroke::new(1.0_f32, p.accent), StrokeKind::Inside);
+            pixels(painter, rect.center(), SPARKLE, (size * 0.55 / 9.0).floor().max(2.0), p.accent);
+        }
+        (Skin::Swiss, Stamp::New) => {
+            // Two thin diamonds crossed: a four-point star.
+            painter.rect_filled(rect, 0.0, p.text);
+            let (c, r, w) = (rect.center(), size * 0.3, size * 0.07);
+            for (a, b) in [(vec2(0.0, r), vec2(w, 0.0)), (vec2(r, 0.0), vec2(0.0, w))] {
+                painter.add(egui::Shape::convex_polygon(vec![c - a, c + b, c + a, c - b], p.panel, Stroke::NONE));
+            }
+        }
         (Skin::Wired, Stamp::Liked) => {
             painter.rect_filled(rect, 0.0, p.accent);
             pixels(painter, rect.center(), HEART, (size / 11.0).floor().max(3.0), p.on_accent);
         }
         (Skin::Swiss, Stamp::Liked) => {
             painter.rect_filled(rect, 0.0, p.accent);
-            heart(painter, rect.center(), size * 0.24, Color32::WHITE);
+            heart(painter, rect.center(), size * 0.24, p.on_accent);
         }
         (Skin::Wired, Stamp::Text(t)) => {
             dither(painter, rect, if big { p.accent } else { p.dim });

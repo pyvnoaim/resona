@@ -1,16 +1,18 @@
 //! Input: the keyboard, the macOS menu bar and media keys / Now Playing. All of it ends in App::command.
+//! Without the menu bar (Windows, Linux) the keyboard handles the Ctrl shortcuts itself.
 
 use std::time::Duration;
 
 use eframe::egui;
 
-use crate::skin::{self, Skin};
+use crate::skin;
 use crate::{App, settings::*, state::*, ui::side_lists};
 
 impl App {
     /// The macOS menu bar: every action with its shortcut, so they're discoverable. ⌘ shortcuts are real
     /// key equivalents; plain keys (Space, S, R…) only appear in the item's name, since a menu key
     /// equivalent without ⌘ would also fire while typing in the search box.
+    #[cfg(target_os = "macos")]
     pub fn attach_menu(&mut self, ctx: &egui::Context) {
         use muda::{Menu, MenuItem, PredefinedMenuItem as Pre, Submenu};
         let item = |id: &str, text: &str, keys: Option<&str>| MenuItem::with_id(id, text, true, keys.and_then(|k| k.parse().ok()));
@@ -34,6 +36,9 @@ impl App {
             ])?;
             let skins = Submenu::with_items("Skin", true, &[&item("skin:Wired", "Wired", None), &item("skin:Swiss", "Swiss", None)])?;
             let themes = Submenu::with_items("Theme", true, &[&item("theme:System", "Follow macOS", None), &item("theme:Dark", "Dark", None), &item("theme:Light", "Light", None)])?;
+            let accent_items: Vec<_> = skin::Accent::ALL.iter().map(|a| item(&format!("accent:{a:?}"), &format!("{a:?}"), None)).collect();
+            let accent_refs: Vec<&dyn muda::IsMenuItem> = accent_items.iter().map(|i| i as &dyn muda::IsMenuItem).collect();
+            let accents = Submenu::with_items("Accent", true, &accent_refs)?;
             let view = Submenu::with_items("View", true, &[
                 &item("search", "Search Spotify", Some("CmdOrCtrl+F")),
                 &item("jump", "Jump to the Playing Song", Some("CmdOrCtrl+J")),
@@ -42,6 +47,7 @@ impl App {
                 &sep(),
                 &skins,
                 &themes,
+                &accents,
                 &item("settings", "Skin and Theme Menu…", Some("CmdOrCtrl+Comma")),
             ])?;
             let song = Submenu::with_items("Song", true, &[
@@ -66,6 +72,7 @@ impl App {
     }
 
     /// Menu bar clicks (and ⌘ shortcuts, which the menu receives first).
+    #[cfg(target_os = "macos")]
     pub fn menu_events(&mut self, ctx: &egui::Context) {
         let ids: Vec<String> = self.menu_rx.try_iter().map(|e| e.id().0.clone()).collect();
         for id in ids {
@@ -98,7 +105,11 @@ impl App {
                 "queue" => self.queue_cursor(),
                 "help" => self.help = !self.help,
                 other => {
-                    if let Some(name) = other.strip_prefix("skin:") && let Some(sk) = Skin::ALL.into_iter().find(|s| format!("{s:?}") == name) {
+                    if let Some(name) = other.strip_prefix("accent:") && let Some(a) = skin::Accent::ALL.into_iter().find(|a| format!("{a:?}") == name) {
+                        skin::set_accent(ctx, a);
+                        save_settings(ctx);
+                    }
+                    if let Some(name) = other.strip_prefix("skin:") && let Some(sk) = skin::Skin::ALL.into_iter().find(|s| format!("{s:?}") == name) {
                         skin::apply(ctx, sk);
                         save_settings(ctx);
                     }
@@ -117,7 +128,9 @@ impl App {
         }
     }
 
-    /// Hooks into macOS Now Playing: media keys, AirPods and Control Center send us commands.
+    /// Hooks into the system's media controls: macOS Now Playing (media keys, AirPods, Control Center), Linux MPRIS.
+    /// ponytail: not on Windows, where souvlaki needs the window's HWND (and panics without it); pass it from
+    /// eframe's CreationContext to get media keys there.
     pub fn attach_media(&mut self, ctx: &egui::Context) {
         let config = souvlaki::PlatformConfig { display_name: "resona", dbus_name: "resona", hwnd: None };
         let Ok(mut controls) = souvlaki::MediaControls::new(config) else { return };
@@ -198,6 +211,7 @@ impl App {
         if hit(Key::Questionmark) || (shift && hit(Key::Slash)) { self.help = !self.help }
         if hit(Key::Space) { self.command(Cmd::Toggle) }
         let now = self.state.lock().unwrap().now.clone();
+        #[cfg(target_os = "macos")]
         if cmd && self.menu.is_some() { return } // the menu bar owns the ⌘ shortcuts
         if cmd {
             if hit(Key::ArrowRight) { self.command(Cmd::Next) }
@@ -213,6 +227,7 @@ impl App {
                 ctx.copy_text(format!("https://open.spotify.com/track/{id}"));
             }
             if hit(Key::Comma) { ctx.data_mut(|d| d.insert_temp(egui::Id::new("open-menu"), true)) }
+            if hit(Key::O) { self.state.lock().unwrap().cycle_sort() }
             return;
         }
         if hit(Key::ArrowRight) { self.command(Cmd::SeekBy(10_000)) }

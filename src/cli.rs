@@ -21,9 +21,6 @@ type C = (u8, u8, u8);
 const BG: C = (0x1a, 0x1d, 0x23);
 const RULE: C = (0x2c, 0x31, 0x3a);
 const PANEL: C = (0x1e, 0x21, 0x28);
-/// The selected row: clearly lit in the focused pane, a softer `DULL` in the other.
-const CURSOR: C = (0x4a, 0x1d, 0x23);
-const DULL: C = (0x2e, 0x21, 0x26);
 const FG: C = (0xc9, 0xd1, 0xd9);
 /// The playing song's name and ▶ on the selected (red) row, where red on red would vanish.
 const BRIGHT: C = (0xf4, 0xf6, 0xf8);
@@ -31,7 +28,26 @@ const DIM: C = (0x6b, 0x72, 0x80);
 const SUB: C = (0x5f, 0x67, 0x73);
 const FAINT: C = (0x4a, 0x51, 0x5b);
 const GUTTER: C = (0x34, 0x3a, 0x44);
-const RED: C = (0xe0, 0x28, 0x2e);
+
+/// The accent (red unless another is picked in the window), read once at start.
+fn red() -> C {
+    static ACCENT: std::sync::OnceLock<C> = std::sync::OnceLock::new();
+    *ACCENT.get_or_init(|| {
+        let accent = if cfg!(test) { Default::default() } else { saved_accent() }; // tests don't read your settings
+        let c = crate::skin::pal_of(crate::skin::Skin::Wired, egui::Theme::Dark, accent).accent;
+        (c.r(), c.g(), c.b())
+    })
+}
+
+/// The selected row: clearly lit in the focused pane (`cursor`), softer in the other (`dull`): the accent over the
+/// background, a quarter and a tenth of the way.
+fn tint(share: f32) -> C {
+    let (a, b) = (red(), BG);
+    let mix = |x: u8, y: u8| (y as f32 + (x as f32 - y as f32) * share).round() as u8;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+fn cursor() -> C { tint(0.25) }
+fn dull() -> C { tint(0.1) }
 
 const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -278,7 +294,7 @@ impl Tui {
         let name: String = "r e s o n a".chars().take((t * 22.0) as usize).collect();
         let status = if s.status.is_empty() { "starting…" } else { &s.status };
         let mut lines = vec![row(&[]); h.saturating_sub(7) / 2];
-        lines.extend([row(&[(bars, RED)]), row(&[]), row(&[(format!("{name:<11}"), BRIGHT)]), row(&[]), row(&[(status.into(), DIM)]), row(&[]), row(&[("q quits".into(), GUTTER)])]);
+        lines.extend([row(&[(bars, red())]), row(&[]), row(&[(format!("{name:<11}"), BRIGHT)]), row(&[]), row(&[(status.into(), DIM)]), row(&[]), row(&[("q quits".into(), GUTTER)])]);
         lines.resize_with(h, || row(&[]));
         lines
     }
@@ -302,9 +318,9 @@ impl Tui {
         // Brand, then whatever the engine has to say.
         lines.push(line(center(&[("resona".into(), FG), (concat!("  v", env!("CARGO_PKG_VERSION")).into(), GUTTER)], cw, None)));
         let note = match (&s.error, s.status.is_empty(), s.notice()) {
-            (Some(err), _, _) => vec![(short_err(err), RED)],
+            (Some(err), _, _) => vec![(short_err(err), red())],
             (None, false, _) => vec![(s.status.clone(), DIM)],
-            (None, true, Some(n)) => vec![(n.text.clone(), if n.error { RED } else { SUB })],
+            (None, true, Some(n)) => vec![(n.text.clone(), if n.error { red() } else { SUB })],
             _ => vec![],
         };
         lines.push(line(center(&note, cw, None)));
@@ -312,21 +328,21 @@ impl Tui {
         // Lists and songs, side by side; the focused box is the red one.
         let lw = (longest + 4).clamp(22, (cw / 3).max(22));
         let rw = cw - lw - 1;
-        let edge = |pane| if self.pane == pane { RED } else { FAINT };
+        let edge = |pane| if self.pane == pane { red() } else { FAINT };
         let count = count(s, self.spin());
         lines.push(line(format!("{} {}",
             top(lw, edge(Pane::Lists), &[("library".into(), FG)], &[(lists.len().to_string(), DIM)]),
             top(rw, edge(Pane::Songs), &[(title(s, lists), FG)], &[(count, DIM)]))));
         scroll(&mut self.side_top, self.side, body_h);
         scroll(&mut self.row_top, self.row, body_h);
-        let cursor_bg = |on: bool, pane| if !on { None } else if self.pane == pane { Some(CURSOR) } else { Some(DULL) };
+        let cursor_bg = |on: bool, pane| if !on { None } else if self.pane == pane { Some(cursor()) } else { Some(dull()) };
         for i in 0..body_h {
             let mut left = Seg::new(lw - 4, None);
             if let Some((src, name)) = lists.get(self.side_top + i) {
                 let open = s.view.as_ref() == Some(src);
                 let sel = self.side_top + i == self.side;
                 left = Seg::new(lw - 4, cursor_bg(sel, Pane::Lists));
-                left.put(name, if open { RED } else if sel { FG } else { DIM });
+                left.put(name, if open { red() } else if sel { FG } else { DIM });
             }
             let at = self.row_top + i;
             let mut right = Seg::new(rw - 4, None);
@@ -362,7 +378,7 @@ impl Tui {
                 let (a, b) = (clock(pos), clock(dur));
                 let bar_w = (cw - 4).saturating_sub(a.len() + b.len() + 2);
                 let filled = (pos as usize * bar_w / dur as usize).min(bar_w);
-                bar.put(&a, DIM).put(" ", DIM).put(&"⣿".repeat(filled), RED).put(&"⣀".repeat(bar_w - filled), GUTTER).put(" ", DIM).put(&b, DIM);
+                bar.put(&a, DIM).put(" ", DIM).put(&"⣿".repeat(filled), red()).put(&"⣀".repeat(bar_w - filled), GUTTER).put(" ", DIM).put(&b, DIM);
             }
             None => { song.put("nothing playing", GUTTER); }
         }
@@ -374,7 +390,7 @@ impl Tui {
         // Keys, or the search being typed.
         match &self.search {
             Some(q) => {
-                lines.push(line(center(&[("/ ".into(), RED), (q.clone(), FG), ("▌".into(), RED)], cw, None)));
+                lines.push(line(center(&[("/ ".into(), red()), (q.clone(), FG), ("▌".into(), red())], cw, None)));
                 lines.push(line(center(&keys(&[("enter", "search"), ("esc", "cancel")]), cw, None)));
             }
             None => {
@@ -395,16 +411,16 @@ impl Tui {
         // Header: brand hard left, what's open hard right.
         lines.push(Seg::new(w, Some(BG)).done());
         let mut status: Vec<(String, C)> = Vec::new();
-        if let Some(err) = &s.error { status.push((format!("{}  ·  ", short_err(err)), RED)) }
+        if let Some(err) = &s.error { status.push((format!("{}  ·  ", short_err(err)), red())) }
         if !s.status.is_empty() {
             status.push((s.status.clone(), DIM));
         } else {
             status.push((title(s, lists), DIM));
             status.push((format!("  ·  {}", count(s, self.spin())), SUB));
-            if let Some(n) = s.notice() { status.push((format!("  ·  {}", n.text), if n.error { RED } else { SUB })) }
+            if let Some(n) = s.notice() { status.push((format!("  ·  {}", n.text), if n.error { red() } else { SUB })) }
         }
         let mut head = Seg::new(w, Some(BG));
-        head.pad(2).put("▌ ", RED).put("resona", FG).put(concat!(" v", env!("CARGO_PKG_VERSION")), GUTTER);
+        head.pad(2).put("▌ ", red()).put("resona", FG).put(concat!(" v", env!("CARGO_PKG_VERSION")), GUTTER);
         lines.push(head.right(&status, 2).done());
         lines.push(rule());
 
@@ -415,14 +431,14 @@ impl Tui {
         let rw = inner - lw - 3;
         scroll(&mut self.side_top, self.side, body_h);
         scroll(&mut self.row_top, self.row, body_h);
-        let cursor_bg = |on: bool, pane| Some(if !on { BG } else if self.pane == pane { CURSOR } else { DULL });
+        let cursor_bg = |on: bool, pane| Some(if !on { BG } else if self.pane == pane { cursor() } else { dull() });
         for i in 0..body_h {
             let mut left = Seg::new(lw, Some(BG));
             if let Some((src, name)) = lists.get(self.side_top + i) {
                 let open = s.view.as_ref() == Some(src);
                 let sel = self.side_top + i == self.side;
                 left = Seg::new(lw, cursor_bg(sel, Pane::Lists));
-                left.put(if open { "▌ " } else { "  " }, RED).put(name, if open || sel { FG } else { DIM });
+                left.put(if open { "▌ " } else { "  " }, red()).put(name, if open || sel { FG } else { DIM });
             }
             let at = self.row_top + i;
             let mut right = Seg::new(rw, Some(BG));
@@ -442,7 +458,7 @@ impl Tui {
             let bar_w = (inner / 5).clamp(10, 40);
             let filled = (pos as usize * bar_w / dur as usize).min(bar_w);
             right.push((format!("{}  ", clock(pos)), DIM));
-            right.push(("━".repeat(filled), RED));
+            right.push(("━".repeat(filled), red()));
             right.push(("─".repeat(bar_w - filled), RULE));
             right.push((format!("  {}", clock(dur)), DIM));
         }
@@ -456,7 +472,7 @@ impl Tui {
         match &s.now {
             Some(t) => {
                 let mut song = Seg::new(room, Some(PANEL));
-                song.put("▌ ", RED).put(if s.since.is_some() { "▶  " } else { "‖  " }, FG).put(&t.name, FG).put("  ", FG).put(&t.artist_line(), SUB);
+                song.put("▌ ", red()).put(if s.since.is_some() { "▶  " } else { "‖  " }, FG).put(&t.name, FG).put("  ", FG).put(&t.artist_line(), SUB);
                 player.raw(song.done(), room);
             }
             None => { player.put("  nothing playing", FAINT); }
@@ -467,7 +483,7 @@ impl Tui {
         let mut keys = Seg::new(w, Some(BG));
         keys.pad(2);
         match &self.search {
-            Some(q) => { keys.put("/ ", RED).put(q, FG).put("▌", RED).put("   enter search   esc cancel", DIM); }
+            Some(q) => { keys.put("/ ", red()).put(q, FG).put("▌", red()).put("   enter search   esc cancel", DIM); }
             None => for (i, (k, label)) in KEYS.iter().enumerate() {
                 keys.put(if i == 0 { "" } else { "   " }, DIM).put(k, FG).put(" ", DIM).put(label, DIM);
             },
@@ -489,10 +505,10 @@ fn song_row(s: &State, at: usize, w: usize, bar: bool, bg: Option<C>, sel: bool)
     let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
     // Faded songs and the number column step up a shade on the selected row; red would vanish on it.
     let (faded, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
-    let accent = if sel { BRIGHT } else { RED };
+    let accent = if sel { BRIGHT } else { red() };
     let num = if playing { "▶".to_string() } else { (at + 1).to_string() };
     let mut row = Seg::new(w, bg);
-    if bar { row.put(if playing { "▌ " } else { "  " }, RED); }
+    if bar { row.put(if playing { "▌ " } else { "  " }, red()); }
     row.col(&format!("{num:>num_w$}"), if playing { accent } else { faded }, num_w + 2)
         .col(&t.name, if playing { accent } else if gone { faded } else { FG }, name_w)
         .col(&t.artist_line(), if gone { faded } else { sub }, artist_w)
@@ -700,7 +716,7 @@ fn fit_cuts_by_cells_and_rows_come_out_exactly_wide() {
     let mut s = Seg::new(20, None);
     s.col("a long song name here", FG, 8).right(&[(clock(61_000), DIM)], 0);
     assert_eq!(s.used, 20);
-    let boxed = top(30, RED, &[("a title far too long for it".into(), FG)], &[("68".into(), DIM)]);
+    let boxed = top(30, red(), &[("a title far too long for it".into(), FG)], &[("68".into(), DIM)]);
     let plain: String = boxed.split('\x1b').map(|p| p.split_once('m').map_or(p, |(_, t)| t)).collect();
     assert_eq!(fit(&plain, usize::MAX).1, 30); // titled borders stay exactly as wide as their box
     let (a, b) = (vec!["x".to_string(), "y".into()], vec!["x".to_string(), "z".into()]);

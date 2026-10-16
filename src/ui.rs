@@ -362,6 +362,18 @@ pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32, centred: bool) -> Option<
     picked
 }
 
+/// A shortcut as this platform writes it: "⌘ F" on macOS, "Ctrl F" elsewhere.
+pub fn cmd_keys(s: &str) -> String {
+    if cfg!(target_os = "macos") { s.into() } else { s.replace("⌘ ", "Ctrl ").replace('⌘', "Ctrl+").replace('⇧', "Shift") }
+}
+
+#[test]
+fn shortcut_labels_fit_the_platform() {
+    let (word, glued) = (cmd_keys("⌘ ⇧ C"), cmd_keys("Next (⌘→)"));
+    if cfg!(target_os = "macos") { assert_eq!((word.as_str(), glued.as_str()), ("⌘ ⇧ C", "Next (⌘→)")) }
+    else { assert_eq!((word.as_str(), glued.as_str()), ("Ctrl Shift C", "Next (Ctrl+→)")) }
+}
+
 /// The "?" overlay: every shortcut, grouped, in the skin's own window style.
 pub fn help_overlay(ctx: &egui::Context) {
     let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
@@ -382,7 +394,7 @@ pub fn help_overlay(ctx: &egui::Context) {
                     ui.label(RichText::new(group.to_uppercase()).font(skin::num(13.0)).color(p.accent));
                     ui.end_row();
                     for (key, what) in keys {
-                        ui.label(RichText::new(*key).font(skin::num(15.0)).color(p.text));
+                        ui.label(RichText::new(cmd_keys(key)).font(skin::num(15.0)).color(p.text));
                         ui.label(RichText::new(*what).size(13.0).color(p.dim));
                         ui.end_row();
                     }
@@ -398,7 +410,7 @@ pub fn help_overlay(ctx: &egui::Context) {
 /// player bar.
 pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
     use egui::ThemePreference::{Dark, Light, System};
-    let r = skin::icon_button(ui, skin::Glyph::Menu, false).on_hover_text("Skin and theme (⌘,)");
+    let r = skin::icon_button(ui, skin::Glyph::Menu, false).on_hover_text(cmd_keys("Skin and theme (⌘,)"));
     // ⌘, asks for the menu through a flag, since the shortcut isn't a click on this button.
     let asked = ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("open-menu"))).unwrap_or(false);
     if asked { egui::Popup::toggle_id(ctx, egui::Popup::default_response_id(&r)) }
@@ -414,9 +426,22 @@ pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         }
         ui.separator();
+        head(ui, "Accent");
+        let now = skin::accent(ctx);
+        for a in skin::Accent::ALL {
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                ui.painter().rect_filled(dot, 0.0, skin::pal_of(current, ctx.theme(), a).accent);
+                if ui.selectable_label(a == now, format!("{a:?}")).clicked() {
+                    skin::set_accent(ctx, a);
+                    save_settings(ctx);
+                }
+            });
+        }
+        ui.separator();
         head(ui, "Theme");
         let theme = ctx.options(|o| o.theme_preference);
-        for (pref, name) in [(System, "Follow macOS"), (Dark, "Dark"), (Light, "Light")] {
+        for (pref, name) in [(System, if cfg!(target_os = "macos") { "Follow macOS" } else { "Follow system" }), (Dark, "Dark"), (Light, "Light")] {
             if ui.selectable_label(theme == pref, name).clicked() {
                 ctx.set_theme(pref);
                 save_settings(ctx);
@@ -582,7 +607,7 @@ impl App {
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(inset)).layout(egui::Layout::left_to_right(egui::Align::Center)));
                         if l.side_cover > 0.0 {
                             let initials = initials(name);
-                            let stamp = match &src { Source::Liked => Stamp::Liked, Source::Queue => Stamp::Queue, _ => Stamp::Text(&initials) };
+                            let stamp = match &src { Source::Liked => Stamp::Liked, Source::Queue => Stamp::Queue, Source::NewReleases => Stamp::New, _ => Stamp::Text(&initials) };
                             skin::cover(&mut child, img, l.side_cover, stamp, false);
                             child.add_space(10.0);
                             child.vertical(|ui| {
@@ -735,6 +760,7 @@ impl App {
                         Source::Liked => Stamp::Liked,
                         Source::Search(_) => Stamp::Search,
                         Source::Queue => Stamp::Queue,
+                        Source::NewReleases => Stamp::New,
                         _ => Stamp::Text(&initials),
                     };
                     skin::cover(ui, img.as_deref(), l.header_cover, stamp, true);
@@ -791,7 +817,7 @@ impl App {
                                 if s.tracks.iter().any(|t| t.added > 0) {
                                     let order = s.sort.label().unwrap_or("list order");
                                     let text = if caps { format!("SORT: {}", order.to_uppercase()) } else { format!("Sort: {order}") };
-                                    if skin::action_button(ui, &text, false).on_hover_text("List order → newest added → oldest added (⌘O)").clicked() { resort = true }
+                                    if skin::action_button(ui, &text, false).on_hover_text(cmd_keys("List order → newest added → oldest added (⌘O)")).clicked() { resort = true }
                                 }
                             });
                         }
@@ -1062,7 +1088,7 @@ impl App {
                 let art = skin::cover(ui, t.thumb(), size, Stamp::None, false);
                 let r = ui.interact(art, egui::Id::new("now-cover"), Sense::click());
                 r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Cover and lyrics (⌘E)").clicked() {
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys("Cover and lyrics (⌘E)")).clicked() {
                     open_big = true;
                 }
                 // Name over artist, measured and centred on the cover (a nested vertical would sit at the top).
@@ -1085,7 +1111,7 @@ impl App {
                 ui.painter().galley(pos2(x, below), artist, p.dim);
                 let r = ui.interact(name_rect, egui::Id::new("now-text"), Sense::click());
                 r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show in its list (⌘J)").clicked() {
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys("Show in its list (⌘J)")).clicked() {
                     jump = true;
                 }
                 let r = link(ui, artist_rect, egui::Id::new("now-artist"), p.dim);
@@ -1093,7 +1119,7 @@ impl App {
                 if r.clicked() { goto = artist_of(t) }
                 if let Some(id) = &t.id {
                     let heart = Rect::from_center_size(pos2(x + text_w + 22.0, art.center().y), vec2(28.0, 28.0));
-                    if skin::heart_toggle(ui, heart, egui::Id::new("like-now"), s.liked.contains(id), true, false).on_hover_text("⌘L").clicked() {
+                    if skin::heart_toggle(ui, heart, egui::Id::new("like-now"), s.liked.contains(id), true, false).on_hover_text(cmd_keys("⌘L")).clicked() {
                         like_now = Some(id.clone());
                     }
                 }
@@ -1115,9 +1141,9 @@ impl App {
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.add_space((ui.available_width() - widths - 4.0 * gap) / 2.0);
                 toggle_shuffle = skin::icon_button(ui, skin::Glyph::Shuffle, shuffle).on_hover_text("Shuffle (S)").clicked();
-                if skin::ctl_button(ui, Ctl::Prev).on_hover_text("Previous (⌘←)").clicked() { cmds.push(Cmd::Prev) }
+                if skin::ctl_button(ui, Ctl::Prev).on_hover_text(cmd_keys("Previous (⌘←)")).clicked() { cmds.push(Cmd::Prev) }
                 if skin::ctl_button(ui, if playing { Ctl::Pause } else { Ctl::Play }).on_hover_text("Play / pause (space)").clicked() { cmds.push(Cmd::Toggle) }
-                if skin::ctl_button(ui, Ctl::Next).on_hover_text("Next (⌘→)").clicked() { cmds.push(Cmd::Next) }
+                if skin::ctl_button(ui, Ctl::Next).on_hover_text(cmd_keys("Next (⌘→)")).clicked() { cmds.push(Cmd::Next) }
                 let glyph = if repeat == Repeat::One { skin::Glyph::RepeatOne } else { skin::Glyph::Repeat };
                 let hint = match repeat { Repeat::Off => "Repeat: off (R)", Repeat::All => "Repeat: all (R)", Repeat::One => "Repeat: this song (R)" };
                 cycle_repeat = skin::icon_button(ui, glyph, repeat != Repeat::Off).on_hover_text(hint).clicked();
@@ -1160,7 +1186,7 @@ impl App {
                 }
             }
             ui.add_space(18.0);
-            if skin::icon_button(ui, skin::Glyph::Note, self.big).on_hover_text("Cover and lyrics (⌘E, Esc goes back)").clicked() {
+            if skin::icon_button(ui, skin::Glyph::Note, self.big).on_hover_text(cmd_keys("Cover and lyrics (⌘E, Esc goes back)")).clicked() {
                 self.big = !self.big;
             }
             ui.add_space(6.0);

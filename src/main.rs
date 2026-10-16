@@ -66,8 +66,12 @@ struct App {
     media_sent: (Option<String>, bool, u32),
     /// First launch without a client ID: what's typed into the setup screen. Nothing connects until it's saved.
     setup: Option<String>,
+    /// The accent the Dock icon was last drawn in.
+    icon_accent: Option<skin::Accent>,
     /// The macOS menu bar (kept alive here) and its clicks.
+    #[cfg(target_os = "macos")]
     menu: Option<muda::Menu>,
+    #[cfg(target_os = "macos")]
     menu_rx: std::sync::mpsc::Receiver<muda::MenuEvent>,
 }
 
@@ -99,14 +103,19 @@ impl App {
             media: None,
             media_rx: std::sync::mpsc::channel().1,
             media_sent: (None, false, 0),
+            #[cfg(target_os = "macos")]
             menu: None,
+            #[cfg(target_os = "macos")]
             menu_rx: std::sync::mpsc::channel().1,
             setup: None,
+            icon_accent: None,
         };
+        #[cfg(target_os = "macos")]
         app.attach_menu(&cc.egui_ctx);
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
         app.state.lock().unwrap().added_to = setting("added_to").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
+        #[cfg(not(target_os = "windows"))] // souvlaki panics on Windows without the window's HWND
         app.attach_media(&cc.egui_ctx);
         match api::client_id(&resona_dir()) {
             Some(_) => app.start(&cc.egui_ctx),
@@ -499,8 +508,13 @@ pub fn command(e: &Engine, s: &mut State, cmd: Cmd) {
     }
 }
 
+/// Elsewhere winit shows the cursor egui asks for.
+#[cfg(not(target_os = "macos"))]
+fn show_cursor(_: &egui::Context) {}
+
 /// Shows the cursor egui asked for this frame. egui-winit asks too, but winit 0.30 changes the cursor through
 /// AppKit cursor rects, and on macOS 27 the hand over buttons never showed that way.
+#[cfg(target_os = "macos")]
 fn show_cursor(ctx: &egui::Context) {
     use objc2_app_kit::NSCursor;
     if !ctx.input(|i| i.focused && i.pointer.has_pointer()) { return } // not ours to set: another app is in front, or the pointer is elsewhere
@@ -533,9 +547,14 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.restore(ctx);
         self.sync_media();
+        #[cfg(target_os = "macos")]
         self.menu_events(ctx);
         self.keys(ctx);
         self.window_title(ctx);
+        if self.icon_accent != Some(skin::accent(ctx)) {
+            self.icon_accent = Some(skin::accent(ctx));
+            set_app_icon(ctx, icon_ink(skin::accent(ctx)));
+        }
         self.bars_shown.set(false);
         if let Some(typed) = &mut self.setup {
             let ground = egui::Frame::new().fill(skin::pal(ctx).ground);
@@ -594,6 +613,12 @@ fn main() -> eframe::Result {
         cli::run();
         return Ok(());
     }
+    // `resona icon`: the 1024px icon in the saved accent, raw RGBA on stdout, for bundle.sh to wrap as a PNG.
+    if std::env::args().nth(1).as_deref() == Some("icon") {
+        use std::io::Write as _;
+        let _ = std::io::stdout().write_all(&skin::app_icon(1024, icon_ink(saved_accent())));
+        return Ok(());
+    }
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]).with_min_inner_size([760.0, 480.0]).with_title("resona")
             // Empty, or eframe swaps in its own default icon over the bundle's at runtime.
@@ -601,4 +626,43 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("resona", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// The icon's ink: the accent's dark-theme shade (the icon is dark).
+fn icon_ink(a: skin::Accent) -> egui::Color32 {
+    skin::pal_of(skin::Skin::Wired, egui::Theme::Dark, a).accent
+}
+
+/// Windows and Linux: the window's icon (title bar, taskbar), which winit can change at any time.
+#[cfg(not(target_os = "macos"))]
+fn set_app_icon(ctx: &egui::Context, ink: egui::Color32) {
+    const N: u32 = 128;
+    let icon = egui::IconData { rgba: skin::app_icon(N as usize, ink), width: N, height: N };
+    ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(icon))));
+}
+
+/// The Dock icon in `ink`. eframe sets an icon only once, at startup, so a new accent repaints it here.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn set_app_icon(_: &egui::Context, ink: egui::Color32) {
+    use objc2::{AllocAnyThread as _, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage};
+    use objc2_foundation::NSSize;
+    const N: usize = 1024; // as sharp as the bundle's own icon in a big Retina Dock
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let rgba = skin::app_icon(N, ink); // alpha is 0 or 255, so already premultiplied as AppKit expects
+    // SAFETY: null planes make the rep allocate and own its pixel buffer (N*N*4 bytes, as described); ours is
+    // copied into it, so nothing it keeps points at memory we free.
+    unsafe {
+        let Some(rep) = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(), std::ptr::null_mut(), N as isize, N as isize, 8, 4, true, false, NSDeviceRGBColorSpace, (N * 4) as isize, 32,
+        ) else { return };
+        let data = rep.bitmapData();
+        // The buffer must be exactly what we asked for: unpadded rows of N RGBA pixels.
+        if data.is_null() || rep.bytesPerRow() != (N * 4) as isize || rgba.len() != N * N * 4 { return }
+        std::ptr::copy_nonoverlapping(rgba.as_ptr(), data, rgba.len());
+        let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(N as f64, N as f64));
+        image.addRepresentation(&rep);
+        NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
+    }
 }

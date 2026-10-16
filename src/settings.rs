@@ -31,13 +31,21 @@ pub fn set_setting(key: &str, value: &str) {
     let _ = std::fs::write(path, lines.join("\n") + "\n");
 }
 
-/// Skin and theme survive restarts.
+/// The accent colour from ~/.resona/settings (the skin's red if unset).
+pub fn saved_accent() -> skin::Accent {
+    let saved = setting("accent").unwrap_or_default();
+    skin::Accent::ALL.into_iter().find(|a| format!("{a:?}") == saved).unwrap_or_default()
+}
+
+/// Skin, theme and accent survive restarts.
 pub fn save_settings(ctx: &egui::Context) {
     set_setting("skin", &format!("{:?}", skin::skin(ctx)));
+    set_setting("accent", &format!("{:?}", skin::accent(ctx)));
     set_setting("theme", &format!("{:?}", ctx.options(|o| o.theme_preference)));
 }
 
 pub fn load_settings(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("accent"), saved_accent())); // before apply, which paints with it
     let saved = setting("skin").unwrap_or_default();
     skin::apply(ctx, Skin::ALL.into_iter().find(|s| format!("{s:?}") == saved).unwrap_or_default());
     match setting("theme").as_deref() {

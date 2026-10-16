@@ -18,11 +18,12 @@ Two skins, each with a dark and a light theme:
 - Like and unlike songs, add songs to playlists or a new one (right-click, also on the playing song)
 - Big cover view with synced lyrics; artist and album names open their pages
 - Media keys, Now Playing, and a native menu bar with shortcuts (press `?` in the app for the full list)
-- Remembers skin, theme, volume and the last open list
+- Six accent colours (menu or ⌘,), also for the terminal version and the app icon
+- Remembers skin, theme, accent, volume and the last open list
 
 ## Requirements
 
-- A Mac (macOS only for now; see [Windows and Linux](#windows-and-linux))
+- A Mac (Windows and Linux build too, with fewer extras: see [Windows and Linux](#windows-and-linux))
 - Spotify **Premium**: playback goes through librespot, which Spotify only allows for Premium accounts
 - Your own Spotify developer app: free, made in step 3 below
 
@@ -94,9 +95,23 @@ Use the release build: the debug build decodes audio too slowly.
 
 ## Windows and Linux
 
-Not yet. Most of Resona is cross-platform (egui, librespot, the menu and media-key crates), but a few pieces
-call macOS directly: the mouse cursor fix (AppKit), the menu bar setup, and `bundle.sh`. Gating those behind
-`#[cfg(target_os = "macos")]` would likely get it building on Windows and Linux; it hasn't been tried.
+Resona builds there too (checked on every push by GitHub Actions), but it's only used day to day on macOS, so
+expect rough edges. What's different:
+
+- No menu bar: the same shortcuts use Ctrl instead of ⌘ (press `?` for the list).
+- Media keys: Linux yes (MPRIS, so desktop media controls work); Windows not yet.
+- No `bundle.sh`: build and run it directly.
+
+```sh
+# Linux (Debian/Ubuntu) only: audio and TLS libraries
+sudo apt install libasound2-dev libssl-dev pkg-config
+
+cargo build --release
+./target/release/resona          # Windows: target\release\resona.exe
+```
+
+Resona keeps its files in `~/.resona` (on Windows `C:\Users\<you>\.resona`). The first-launch steps are the
+same as on the Mac.
 
 ## License
 

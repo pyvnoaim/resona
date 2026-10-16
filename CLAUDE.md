@@ -10,7 +10,7 @@ Two skins, each with a dark and a light palette: **Wired** (Lain-style cyber/pix
 cargo build --release && ./target/release/resona   # use release: debug decodes audio slowly
 cargo test
 cargo clippy --all-targets                            # keep it warning-free
-./bundle.sh                                           # Resona.app (icon, Info.plist) into /Applications
+./bundle.sh                                           # Resona.app (icon in your accent, Info.plist) into /Applications
 ./target/release/resona cli                           # the same player full-screen in the terminal
 ```
 
@@ -21,7 +21,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `client_id` | the client ID of the user's own Spotify developer app (asked for on first launch; `RESONA_CLIENT_ID` overrides) |
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
+| `settings` | `key=value`: skin, theme, accent, volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 
@@ -101,6 +101,15 @@ font's default instance.
   screen, ~16 fps while a list is loading.
 - **Toasts:** `State::say` shows a short note above the player bar (3 s, errors 6 s), one at a time; `enqueue`
   announces itself. The CLI shows the same note in its status line while it lasts.
+- **Accent colours** (`skin::Accent`): red is each skin's own; the others are swapped into every palette by
+  `tinted` (text on the accent goes black or white), all built once in `pal_of`. The app icon is drawn in Rust
+  (`skin::app_icon`): the Dock icon is repainted on change (`set_app_icon`, AppKit; eframe sets one only at
+  startup), and `bundle.sh` takes the icon file's pixels from `resona icon`. The CLI reads the accent at start.
+- **Other systems:** the menu bar (`muda`), the cursor fix and the Dock icon are macOS-only (`cfg(target_os =
+  "macos")`, and macOS-only dependencies); elsewhere the keyboard handles the Ctrl shortcuts, winit the cursor,
+  and `set_app_icon` sets the window icon. Shortcut labels go through `ui::cmd_keys` (⌘ → Ctrl). Media keys:
+  macOS and Linux (MPRIS over zbus); Windows needs an HWND, not wired yet. `.github/workflows/build.yml` builds
+  all three on every push: the only check that Windows and Linux still compile.
 - Errors are stored raw in `State.error` (or an error toast's `Notice`) and shown through `short_err()` (full text on hover).
 
 ## Conventions
