@@ -22,23 +22,68 @@ Two skins, each with a dark and a light theme:
 
 ## Requirements
 
-- macOS
-- Spotify **Premium** (playback goes through librespot)
-- Rust (stable)
-- Your own Spotify developer app (free, see below)
+- A Mac (macOS only for now; see [Windows and Linux](#windows-and-linux))
+- Spotify **Premium**: playback goes through librespot, which Spotify only allows for Premium accounts
+- Your own Spotify developer app: free, made in step 3 below
 
-## Setup
+## Install
 
-Resona reads your library through a Spotify developer app of your own (free; Spotify keeps apps in development
-mode limited to their owner, so everyone brings their own). On first launch Resona walks you through it:
+### 1. Install the tools
 
-1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) (any name, tick Web API).
-2. Add the redirect URI `http://127.0.0.1:8898/login`.
-3. Paste its **client ID** into Resona. No client secret needed: sign-in uses PKCE.
+Xcode's command line tools (for the compiler and git) and Rust:
 
-The ID is saved in `~/.resona/client_id` (or set `RESONA_CLIENT_ID`). Nothing to edit in the source.
+```sh
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-## Build and run
+Open a new terminal afterwards, so `cargo` is on your path.
+
+### 2. Build and install Resona
+
+```sh
+git clone https://github.com/pyvnoaim/resona.git
+cd resona
+./bundle.sh
+```
+
+`bundle.sh` builds the release version (a few minutes the first time), puts `Resona.app` into `/Applications`
+and the terminal version `resona` into `~/.local/bin`. Run it again after pulling updates.
+
+### 3. Make your Spotify developer app
+
+Resona reads your library through a small app of your own on Spotify's developer site. Spotify limits apps in
+development mode to their owner, so everyone makes their own. It's free and takes two minutes:
+
+1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), sign in with your Spotify
+   account and accept the developer terms.
+2. Click **Create app**. Any name and description will do (for example "Resona").
+3. Under **Redirect URIs**, add exactly `http://127.0.0.1:8898/login` and click Add.
+4. Under **Which API/SDKs are you planning to use?**, tick **Web API**. Accept the terms and click **Save**.
+5. Open the app's **Settings** and copy its **Client ID**. You don't need the client secret.
+
+### 4. First launch
+
+Open Resona from Applications or Spotlight. It asks for the client ID: paste it and click Connect. Your browser
+then opens twice to sign in, once for playback and once for your app. After that Resona signs in by itself.
+
+The terminal version asks for the client ID the same way: run `resona cli`.
+
+## Use
+
+Click a list on the left, then a song to play it. Right-click a song for the queue, likes,
+playlists and song radio. Press `?` for every shortcut. Media keys and Control Center's Now Playing work too.
+
+`resona cli` runs the same player full-screen in the terminal: arrows to move, tab to switch between your lists
+and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit.
+
+## Files and signing in again
+
+Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `web_refresh_token` there to sign
+in again (and `liked` when switching Spotify accounts), and `client_id` to use another developer app. Setting
+`RESONA_CLIENT_ID` overrides the saved ID.
+
+## Building by hand
 
 ```sh
 cargo build --release
@@ -47,15 +92,11 @@ cargo build --release
 
 Use the release build: the debug build decodes audio too slowly.
 
-To install it as an app (Dock, Spotlight), run `./bundle.sh`: it builds `Resona.app` with its icon and moves it
-into `/Applications`. Run it again after each change.
+## Windows and Linux
 
-`resona` (installed into `~/.local/bin` by `bundle.sh`) runs the same player full-screen in the terminal: arrows to move, tab to switch
-between your lists and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit.
-
-After the client ID, the browser opens twice to sign in, once for playback and once for the Web API.
-Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `web_refresh_token` there
-to sign in again, and `client_id` to switch to another developer app.
+Not yet. Most of Resona is cross-platform (egui, librespot, the menu and media-key crates), but a few pieces
+call macOS directly: the mouse cursor fix (AppKit), the menu bar setup, and `bundle.sh`. Gating those behind
+`#[cfg(target_os = "macos")]` would likely get it building on Windows and Linux; it hasn't been tried.
 
 ## License
 
