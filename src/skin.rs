@@ -267,7 +267,7 @@ const SWISS_DARK: Pal = Pal {
     track: rgb(58, 57, 54),
 };
 
-/// Paper-coloured type on carbon. `surface` is the faint band every other pair of rows sits on.
+/// Paper-coloured type on carbon.
 const ASCII_DARK: Pal = Pal {
     ground: rgb(14, 14, 14),
     panel: rgb(20, 20, 20),
@@ -284,7 +284,7 @@ const ASCII_DARK: Pal = Pal {
     track: rgb(61, 59, 54),
 };
 
-/// Tractor-feed printout: black and red ribbon on paper, green bands on every other pair of rows.
+/// Tractor-feed printout: black and red ribbon on paper.
 const ASCII_LIGHT: Pal = Pal {
     ground: rgb(232, 228, 216),
     panel: rgb(243, 240, 230),
@@ -945,8 +945,7 @@ fn queue_glyph(painter: &egui::Painter, c: Pos2, w: f32, color: Color32, pixel: 
 // ---------- rows
 
 /// Background of a track row, and the colours for its text.
-/// `band`: ASCII's tractor-feed band, on every other pair of rows (the caller counts them).
-pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool, band: bool) -> (Color32, Color32) {
+pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color32, Color32) {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let painter = ui.painter();
     match s {
@@ -964,7 +963,6 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool, band: boo
             painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, p.line));
         }
         Skin::Ascii => {
-            if band { painter.rect_filled(rect, 0.0, p.surface); }
             if current { painter.rect_filled(rect, 0.0, p.selected); }
             if hovered {
                 let (font, ink) = (mono(16.0, true), if current { p.on_selected } else { p.accent });

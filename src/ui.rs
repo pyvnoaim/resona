@@ -1009,7 +1009,7 @@ impl App {
                             let current = t.id == now_id;
                             let on = cursor == Some(i);
                             if moused && r.hovered() { point = Some(i) }
-                            let (ink, sub) = skin::row_bg(ui, rect, current, on, i / 2 % 2 == 1);
+                            let (ink, sub) = skin::row_bg(ui, rect, current, on);
                             // Songs Spotify refused this session fade out.
                             let (ink, sub) = if t.id.as_ref().is_some_and(|id| s.unplayable.contains(id)) { (p.dim.gamma_multiply(0.5), p.dim.gamma_multiply(0.4)) } else { (ink, sub) };
                             let (x, y) = (rect.left(), rect.center().y);
