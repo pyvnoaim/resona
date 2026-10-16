@@ -358,7 +358,12 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         let (session, me) = (e.session(), state.lock().unwrap().load_id);
         rt.spawn(async move {
             let since = (std::time::SystemTime::now() - Duration::from_secs(14 * 86_400)).duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-            let done = match api::followed_artists(&web, &http).await {
+            // A ban on the Web API falls back to the last list we got.
+            let artists = match api::followed_artists(&web, &http).await {
+                Ok(a) => { settings::save_following(&a); Ok(a) }
+                Err(e) => settings::load_following().map(|a| a.into_iter().collect()).ok_or(e),
+            };
+            let done = match artists {
                 Ok(artists) => {
                     api::session_new_releases(&session, &artists, since, |tracks| {
                         let mut s = state.lock().unwrap();

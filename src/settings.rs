@@ -95,3 +95,12 @@ pub fn load_liked_ids() -> Option<HashSet<String>> {
 pub fn save_liked_ids(set: &HashSet<String>) {
     write_ids("liked", set)
 }
+
+/// Followed artist ids in ~/.resona/following: New releases still works while the Web API is banned.
+pub fn load_following() -> Option<HashSet<String>> {
+    read_ids("following")
+}
+
+pub fn save_following(ids: &[String]) {
+    write_ids("following", &ids.iter().cloned().collect())
+}

@@ -24,9 +24,10 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `web_refresh_token` | Web API sign-in (mode 0600) |
 | `settings` | `key=value`: skin, theme, accent (a name or `#rrggbb`), volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
 | `unplayable` | track ids Spotify refused to play, one per line |
+| `following` | followed artist ids, kept from the last good Web API read: New releases falls back to it during a ban |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 
-Delete the first two to sign in again (and `liked` too when switching accounts: it holds that account's hearts).
+Delete the first two to sign in again (and `liked` and `following` too when switching accounts: they hold that account's hearts and artists).
 
 ## Layout
 
