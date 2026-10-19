@@ -35,3 +35,8 @@ souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] 
 [profile.release]
 lto = "thin"
 strip = true
+
+# ponytail: block 0.1.6 (via souvlaki and cocoa) has an extern static of an empty enum, a future Rust error;
+# our copy makes it an opaque struct. Drop it once souvlaki moves off block 0.1.
+[patch.crates-io]
+block = { path = "patches/block" }
