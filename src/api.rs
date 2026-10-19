@@ -10,7 +10,7 @@ use librespot::{
     metadata::{self, Metadata},
 };
 use librespot_oauth::{OAuthClient, OAuthClientBuilder};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// The client ID of your own app from developer.spotify.com, used only for the Web API (its redirect URI must be
 /// REDIRECT in engine.rs): `RESONA_CLIENT_ID`, else `~/.resona/client_id`. Each person brings their own, set on the
@@ -108,12 +108,12 @@ pub struct Page<T> {
     pub offset: usize,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct Image {
     pub url: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Named {
     #[serde(default)]
     pub id: Option<String>,
@@ -156,7 +156,7 @@ pub struct Owner {
     pub display_name: Option<String>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Album {
     #[serde(default)]
     pub id: Option<String>,
@@ -168,7 +168,7 @@ pub struct Album {
 
 
 /// Lenient on purpose: playlists also hold episodes and local files.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct Track {
     pub id: Option<String>,
     #[serde(default)]
@@ -318,6 +318,32 @@ pub async fn session_liked(session: &Session) -> Result<std::collections::HashSe
     let ctx = patient(|| session.spclient().get_context(&uri)).await.map_err(|e| format!("Liked Songs: {e}"))?;
     // ponytail: one page held all 4400 songs; follow `next_page_url` if Spotify ever splits it.
     Ok(ctx.pages.iter().flat_map(|p| &p.tracks).filter_map(|t| t.uri().strip_prefix("spotify:track:")).map(String::from).collect())
+}
+
+/// Where a list stands now, asked cheaply, so a copy kept from last time can be trusted: a playlist's revision
+/// (one session request, for one song), Liked Songs' ids (one request, the same as the hearts). None for lists
+/// that aren't kept, or when Spotify can't say.
+pub async fn list_version(session: &Session, src: &crate::state::Source) -> Option<String> {
+    use crate::state::Source;
+    use librespot::protocol::playlist4_external::SelectedListContent;
+    use protobuf::Message;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    match src {
+        Source::Playlist(id) => {
+            let path = format!("/playlist/v2/playlist/{id}?from=0&length=1");
+            let bytes = patient(|| session.spclient().request(&reqwest::Method::GET, &path, None, None)).await.ok()?;
+            let list = SelectedListContent::parse_from_bytes(&bytes).ok()?;
+            Some(list.revision().iter().map(|b| format!("{b:02x}")).collect::<String>()).filter(|v| !v.is_empty())
+        }
+        Source::Liked => {
+            let mut ids: Vec<String> = session_liked(session).await.ok()?.into_iter().collect();
+            ids.sort();
+            let mut h = DefaultHasher::new();
+            ids.hash(&mut h);
+            Some(format!("{:016x}", h.finish()))
+        }
+        _ => None,
+    }
 }
 
 /// The cover Spotify draws for a playlist without its own picture: its first four albums as a mosaic, or the
@@ -690,3 +716,24 @@ fn refused_tells_a_refused_song_from_a_playable_one() {
     });
 }
 
+
+#[test]
+#[ignore = "live: needs ~/.resona/credentials.json and the network (cargo test -- --ignored)"]
+fn list_version_is_steady_for_an_unchanged_list() {
+    use crate::state::Source;
+    use librespot::core::{cache::Cache, config::SessionConfig};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cache = Cache::new(Some(std::env::home_dir().unwrap().join(".resona")), None, None, None).unwrap();
+        let creds = cache.credentials().expect("signed in");
+        let session = Session::new(SessionConfig::default(), Some(cache));
+        session.connect(creds, true).await.unwrap();
+        let first = session_playlists(&session).await.unwrap().remove(0);
+        for src in [Source::Liked, Source::Playlist(first.id)] {
+            let v = list_version(&session, &src).await;
+            assert!(v.is_some());
+            assert_eq!(v, list_version(&session, &src).await);
+        }
+        assert_eq!(list_version(&session, &Source::Search("x".into())).await, None);
+    });
+}

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use eframe::egui;
 
-use crate::skin::{self, Skin};
+use crate::{api::Track, skin::{self, Skin}};
 
 /// Where Resona keeps everything: `~/.resona`.
 pub fn resona_dir() -> std::path::PathBuf {
@@ -103,4 +103,40 @@ pub fn load_following() -> Option<HashSet<String>> {
 
 pub fn save_following(ids: &[String]) {
     write_ids("following", &ids.iter().cloned().collect())
+}
+
+/// A list as last loaded, in ~/.resona/lists/: shown at once while Spotify says it's still `version`.
+/// `added` and `pos` ride alongside each song: the Web API never sends them as fields.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    version: String,
+    tracks: Vec<(Track, i64, usize)>,
+}
+
+fn list_path(key: &str) -> std::path::PathBuf {
+    resona_dir().join("lists").join(key.replace([':', '/'], "_"))
+}
+
+pub fn load_list(key: &str, version: &str) -> Option<Vec<Track>> {
+    let kept: Kept = serde_json::from_slice(&std::fs::read(list_path(key)).ok()?).ok()?;
+    (kept.version == version).then(|| kept.tracks.into_iter().map(|(t, added, pos)| Track { added, pos, ..t }).collect())
+}
+
+pub fn save_list(key: &str, version: &str, tracks: &[Track]) {
+    let kept = Kept { version: version.into(), tracks: tracks.iter().map(|t| (t.clone(), t.added, t.pos)).collect() };
+    let path = list_path(key);
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    // A torn write just fails to parse next time, and the list loads from Spotify.
+    if let Ok(json) = serde_json::to_vec(&kept) { let _ = std::fs::write(path, json); }
+}
+
+#[test]
+fn a_kept_list_comes_back_only_at_its_version() {
+    let key = format!("test:{}", std::process::id());
+    let t = Track { id: Some("a".into()), name: "Song".into(), added: 42, pos: 7, ..Default::default() };
+    save_list(&key, "v1", &[t]);
+    let back = load_list(&key, "v1").unwrap();
+    assert_eq!((back[0].id.as_deref(), back[0].added, back[0].pos, back[0].name.as_str()), (Some("a"), 42, 7, "Song"));
+    assert!(load_list(&key, "v2").is_none());
+    let _ = std::fs::remove_file(list_path(&key));
 }

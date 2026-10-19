@@ -26,8 +26,10 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `following` | followed artist ids, kept from the last good Web API read: New releases falls back to it during a ban |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
+| `lists/` | each playlist and Liked Songs as last loaded, with its version (`api::list_version`: a playlist's revision, a hash of Liked Songs' ids); opening a list asks only the version and shows this copy while it matches |
+| `audio/` | librespot's cache of songs played lately, up to 1 GB, oldest dropped first |
 
-Delete the first two to sign in again (and `liked` and `following` too when switching accounts: they hold that account's hearts and artists).
+Delete the first two to sign in again (and `liked`, `following` and `lists/` too when switching accounts: they hold that account's hearts, artists and lists).
 
 ## Layout
 

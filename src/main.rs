@@ -304,6 +304,18 @@ pub fn ask_members(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared) {
     rt.spawn(load_members(state.clone(), e.web.clone(), e.http.clone(), e.session().username()));
 }
 
+/// Shows the copy of this list kept from last time, if it's still at `version`: no song requests at all.
+fn show_kept(state: &Shared, key: &str, version: &str, me: u64, ctx: &egui::Context) -> bool {
+    let Some(tracks) = load_list(key, version) else { return false };
+    let mut s = state.lock().unwrap();
+    if s.load_id == me {
+        s.add_tracks(tracks);
+        s.loading = false;
+    }
+    ctx.request_repaint();
+    true
+}
+
 /// Switches the main view and streams that list in, page by page.
 pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: Source, ctx: &egui::Context) {
     {
@@ -335,6 +347,9 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
                 Source::Playlist(id) => Ok(id.clone()),
                 _ => unreachable!(),
             };
+            let key = src.key().unwrap_or_default();
+            let version = api::list_version(&session, &src).await;
+            if version.as_deref().is_some_and(|v| show_kept(&state, &key, v, me, &ctx)) { return }
             let done = async { api::session_playlist(&session, &id?, sort, |tracks, total| {
                 let mut s = state.lock().unwrap();
                 if s.load_id != me { return false } // user moved on, or opened it again
@@ -346,6 +361,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             {
                 let mut s = state.lock().unwrap();
                 if s.load_id == me {
+                    if let (Ok(()), Some(v)) = (&done, &version) { save_list(&key, v, &s.tracks) }
                     (s.loading, s.error) = (false, done.err());
                 }
             }
@@ -417,8 +433,12 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         });
         return;
     }
+    let session = e.session();
     rt.spawn(async move {
-        let (edits, sort) = { let s = state.lock().unwrap(); (s.liked_edits, s.sort) };
+        let (edits, sort, me) = { let s = state.lock().unwrap(); (s.liked_edits, s.sort, s.load_id) };
+        let key = src.key().unwrap_or_default();
+        let version = api::list_version(&session, &src).await;
+        if version.as_deref().is_some_and(|v| show_kept(&state, &key, v, me, &ctx)) { return }
         // Pages come in list order, except when the sort puts the list's end on top: Liked Songs is newest
         // first already, playlists oldest first. Then a one-song page asks for the length, and pages are read
         // from the end, so the top of the list fills in first.
@@ -468,6 +488,9 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         }
         let mut s = state.lock().unwrap();
         s.loading = false;
+        // ponytail: one like or unlike changes Liked Songs' version, so its next open reads every page again;
+        // fetch only the new songs if that ever shows.
+        if let (None, Some(v), true) = (&s.error, &version, s.load_id == me) { save_list(&key, v, &s.tracks) }
         if src == Source::Liked && s.error.is_none() && s.liked_edits == edits {
             // The whole of Liked Songs just loaded anyway: that's the fresh set of hearts (unless a like or
             // unlike landed meanwhile; then the pages may predate it, and the set stays as it is).

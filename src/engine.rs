@@ -43,7 +43,7 @@ impl Engine {
     /// librespot never reconnects a session that lost its connection (a network drop, a missed keepalive, sleep):
     /// every load after that fails. A fresh session and player take over; the caller listens to the new events.
     async fn reconnect(&self) -> Result<PlayerEventChannel, String> {
-        let cache = Cache::new(Some(&crate::settings::resona_dir()), None, None, None).map_err(|e| e.to_string())?;
+        let cache = cache()?;
         let creds = cache.credentials().ok_or("No saved sign-in")?;
         let (session, player) = start(cache, creds, &self.mixer).await?;
         let events = player.get_player_event_channel();
@@ -51,6 +51,13 @@ impl Engine {
         *self.player.write().unwrap() = player; // the old one stops when its last clone drops
         Ok(events)
     }
+}
+
+/// The saved sign-in, and the songs played lately (~/.resona/audio, up to 1 GB, oldest dropped first), so a
+/// replay or a step back starts at once without downloading the song again.
+fn cache() -> Result<Cache, String> {
+    let dir = crate::settings::resona_dir();
+    Cache::new(Some(dir.clone()), None, Some(dir.join("audio")), Some(1 << 30)).map_err(|e| e.to_string())
 }
 
 /// A signed-in session and a player on it.
@@ -66,7 +73,7 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
     let set = |s: &str| { state.lock().unwrap().status = s.into(); ctx.request_repaint(); };
     let dir = crate::settings::resona_dir();
     // Saved reusable credentials, so the browser login only happens once.
-    let cache = Cache::new(Some(&dir), None, None, None).map_err(|e| e.to_string())?;
+    let cache = cache()?;
     let creds = match cache.credentials() {
         Some(c) => c,
         None => {
