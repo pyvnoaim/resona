@@ -983,7 +983,7 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color
 pub fn heart_toggle(ui: &mut egui::Ui, rect: Rect, id: egui::Id, on: bool, show_off: bool, current: bool) -> Response {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let r = ui.interact(rect, id, Sense::click());
-    let lit = if current && s == Skin::Wired { p.on_selected } else { p.accent };
+    let lit = if current { p.on_selected } else { p.accent }; // the highlighted row is accent-filled in Wired and ASCII
     let off = if current { p.on_selected.gamma_multiply(0.45) } else { p.dim.gamma_multiply(0.6) };
     let color = if on { Some(lit) } else if r.hovered() { Some(lit.gamma_multiply(0.75)) } else if show_off { Some(off) } else { None };
     if let Some(color) = color {
