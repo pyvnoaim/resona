@@ -165,8 +165,8 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(250)); // drains the bar, then clears it
     }
 
-    fn add_to(&self, playlist: String, name: String, track: String, ctx: &egui::Context) {
-        if let Some(e) = self.engine.get() { add_to(self.rt.handle(), e, &self.state, playlist, name, track, ctx) }
+    fn add_to(&self, playlist: String, name: String, track: String, add: bool, ctx: &egui::Context) {
+        if let Some(e) = self.engine.get() { add_to(self.rt.handle(), e, &self.state, playlist, name, track, add, ctx) }
     }
 
     pub(crate) fn new_playlist(&self, name: String, track: Option<String>, ctx: &egui::Context) {
@@ -248,10 +248,26 @@ pub fn fetch_lyrics(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, s: 
     });
 }
 
-/// Appends a track to one of your playlists, then says so in a toast.
-pub fn add_to(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, playlist: String, name: String, track: String, ctx: &egui::Context) {
+/// Appends a track to one of your playlists (or takes it out, `add` false), then says so in a toast.
+#[allow(clippy::too_many_arguments)] // one toggle more than add needed
+pub fn add_to(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, playlist: String, name: String, track: String, add: bool, ctx: &egui::Context) {
     let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
     rt.spawn(async move {
+        if !add {
+            let done = api::remove_from_playlist(&web, &http, &playlist, &track).await;
+            let mut s = state.lock().unwrap();
+            match done {
+                Ok(()) => {
+                    if s.view == Some(Source::Playlist(playlist.clone())) { s.tracks.retain(|t| t.id.as_ref() != Some(&track)) }
+                    s.members.entry(playlist).or_default().remove(&track);
+                    s.say(format!("Removed from {name}"), false);
+                }
+                Err(err) => s.say(format!("Not removed from {name}: {err}"), true),
+            }
+            drop(s);
+            ctx.request_repaint();
+            return;
+        }
         let done = api::add_to_playlist(&web, &http, &playlist, &track).await;
         let mut s = state.lock().unwrap();
         let order = match done {

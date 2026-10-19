@@ -350,10 +350,11 @@ impl Tui {
             KeyCode::Enter => {
                 let id = p.track.id.clone().unwrap_or_default();
                 match lists.get(p.row) {
-                    Some((pid, name)) if state.lock().unwrap().members.get(pid).is_some_and(|m| m.contains(&id)) => {
-                        state.lock().unwrap().say(format!("Already in {name}"), false);
+                    Some((pid, name)) => {
+                        let has = state.lock().unwrap().members.get(pid).is_some_and(|m| m.contains(&id));
+                        add_to(rt, e, state, pid.clone(), name.clone(), id, !has, ctx);
+                        self.picker = None
                     }
-                    Some((pid, name)) => { add_to(rt, e, state, pid.clone(), name.clone(), id, ctx); self.picker = None }
                     None if p.name.trim().is_empty() => {}
                     None => { new_playlist(rt, e, state, p.name.trim().to_string(), Some(id), ctx); self.picker = None }
                 }
@@ -425,7 +426,7 @@ impl Tui {
                     Some((pid, name)) => {
                         let has = s.members.get(pid).is_some_and(|m| m.contains(&id));
                         row.put(name, if has { DIM } else { FG });
-                        if has { row.put("  √ already in", FAINT); }
+                        if has { row.put("  √ in it, Enter takes it out", FAINT); }
                     }
                     None if i == lists.len() => {
                         row.put("+ ", red());

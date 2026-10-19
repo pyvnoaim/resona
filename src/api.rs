@@ -224,6 +224,12 @@ pub async fn add_to_playlist(auth: &WebAuth, http: &reqwest::Client, playlist: &
     send(auth, http, reqwest::Method::POST, &format!("playlists/{playlist}/items"), Some(body)).await.map(drop)
 }
 
+/// Takes every copy of a track out of one of your playlists. The body says `items` since the 2026 changes (it was `tracks`).
+pub async fn remove_from_playlist(auth: &WebAuth, http: &reqwest::Client, playlist: &str, track_id: &str) -> Result<(), String> {
+    let body = format!(r#"{{"items":[{{"uri":"spotify:track:{track_id}"}}]}}"#);
+    send(auth, http, reqwest::Method::DELETE, &format!("playlists/{playlist}/items"), Some(body)).await.map(drop)
+}
+
 /// Makes a new, private, empty playlist of yours. `POST /me/playlists` since the 2026 changes (it was under `/users/{id}`).
 pub async fn create_playlist(auth: &WebAuth, http: &reqwest::Client, name: &str) -> Result<Playlist, String> {
     let body = serde_json::json!({ "name": name, "public": false }).to_string();

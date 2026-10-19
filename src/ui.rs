@@ -50,7 +50,8 @@ pub struct SongMenu {
     pub play: bool,
     pub enqueue: Option<(api::Track, bool)>,
     pub like: Option<String>,
-    pub add: Option<(String, String, String)>,
+    /// (playlist, its name, track, add or take out)
+    pub add: Option<(String, String, String, bool)>,
     pub create: Option<(String, String)>,
     pub members: bool,
     pub radio: Option<Source>,
@@ -87,10 +88,11 @@ pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, play: b
         ui.separator();
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for (pid, name) in own_lists(s, me) {
-                if s.members.get(&pid).is_some_and(|m| m.contains(id)) {
-                    ui.add_enabled(false, egui::Button::new(format!("√ {name}"))).on_disabled_hover_text("Already in this playlist");
-                } else if ui.button(&name).clicked() {
-                    out.add = Some((pid, name, id.clone()));
+                let has = s.members.get(&pid).is_some_and(|m| m.contains(id));
+                let label = if has { format!("√ {name}") } else { name.clone() };
+                let r = ui.button(label);
+                if (if has { r.on_hover_text("In this playlist: click to take it out") } else { r }).clicked() {
+                    out.add = Some((pid, name, id.clone(), !has));
                     ui.close();
                 }
             }
@@ -1115,7 +1117,7 @@ impl App {
             self.state.lock().unwrap().enqueue(&e.player(), t, next);
         }
         if let Some(id) = menu.like { self.toggle_like(id) }
-        if let Some((playlist, name, track)) = menu.add { self.add_to(playlist, name, track, ctx) }
+        if let Some((playlist, name, track, add)) = menu.add { self.add_to(playlist, name, track, add, ctx) }
         if let Some((name, track)) = menu.create { self.new_playlist(name, Some(track), ctx) }
         if menu.members { self.load_members() }
         if let Some(src) = menu.radio { self.big = false; self.open(src, ctx) }
