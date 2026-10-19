@@ -151,8 +151,8 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         return out;
     };
     let swiss = sk == Skin::Swiss;
-    // Backdrop: the smallest cover, blown up without smoothing, under a dark veil.
-    if let (false, Some(thumb)) = (swiss, t.thumb()) {
+    // Backdrop (Wired only; ASCII never shows real art): the smallest cover, blown up without smoothing, under a dark veil.
+    if let (Skin::Wired, Some(thumb)) = (sk, t.thumb()) {
         let side = full.width().max(full.height());
         let uv_w = full.width() / side;
         let uv_h = full.height() / side;
