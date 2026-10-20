@@ -69,13 +69,15 @@ pub enum Accent {
     Violet,
     Amber,
     Pink,
+    /// No colour: the accent is the skin's own ink, the text colour.
+    Mono,
     /// Your own colour: each skin and theme shows a readable shade of it (`readable`).
     Custom([u8; 3]),
 }
 
 impl Accent {
     /// The named ones, in swatch order.
-    pub const ALL: [Accent; 6] = [Accent::Red, Accent::Blue, Accent::Teal, Accent::Violet, Accent::Amber, Accent::Pink];
+    pub const ALL: [Accent; 7] = [Accent::Red, Accent::Blue, Accent::Teal, Accent::Violet, Accent::Amber, Accent::Pink, Accent::Mono];
 
     /// How it's saved and shown: the name, or `#rrggbb`.
     pub fn key(self) -> String {
@@ -98,6 +100,7 @@ impl Accent {
             Accent::Violet => Some((rgb(165, 110, 255), rgb(110, 52, 206))),
             Accent::Amber => Some((rgb(255, 170, 30), rgb(176, 104, 0))),
             Accent::Pink => Some((rgb(255, 84, 170), rgb(196, 26, 116))),
+            Accent::Mono => None, // each palette's own text, in `pal_of`
             Accent::Custom(_) => None, // made per skin and theme in `custom_pal`
         }
     }
@@ -201,6 +204,8 @@ fn accents_keep_text_readable() {
     assert_eq!((amber.accent, amber.selected, amber.on_accent, amber.on_selected), (rgb(255, 170, 30), rgb(255, 170, 30), rgb(0, 0, 0), rgb(0, 0, 0)));
     let blue = tinted(&SWISS_LIGHT, rgb(22, 82, 204)); // Swiss marks the playing row with accent text on paper
     assert_eq!((blue.selected, blue.on_selected, blue.on_accent), (SWISS_LIGHT.selected, rgb(22, 82, 204), rgb(250, 248, 242)));
+    let mono = pal_of(Skin::Wired, egui::Theme::Dark, Accent::Mono); // ink on black, black on the ink
+    assert_eq!((mono.accent, mono.on_accent), (WIRED_DARK.text, rgb(0, 0, 0)));
 }
 
 const WIRED_DARK: Pal = Pal {
@@ -421,7 +426,7 @@ pub fn pal_of(skin: Skin, theme: egui::Theme, a: Accent) -> &'static Pal {
             let l = look_of(s);
             for (light, base) in [(false, &l.dark), (true, &l.light)] {
                 for a in Accent::ALL {
-                    v.push(match a.shades() { None => *base, Some((d, li)) => tinted(base, if light { li } else { d }) });
+                    v.push(match a.shades() { None if a == Accent::Mono => tinted(base, base.text), None => *base, Some((d, li)) => tinted(base, if light { li } else { d }) });
                 }
             }
         }
