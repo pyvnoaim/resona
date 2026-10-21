@@ -13,7 +13,6 @@
 - [ ] The rootlist fallback reads one page of 500 entries, and has no covers for lists with Spotify's mosaic.
 - [ ] A followed playlist that wasn't loaded (partial library) can be routed to the Web API and fail (`open_list`).
 - [ ] Two expiring Web API calls can both refresh the token at once (`WebAuth::token`). Harmless today.
-- [ ] `block` (pulled in by `souvlaki` for media keys) has a future-incompatibility warning from rustc.
 - [ ] New releases asks the Web API for every followed artist and reads them all again on each open; with
       hundreds of artists the first songs take a while. Cache the artist list (and each artist's newest release)
       for the session if it gets slow.

@@ -51,6 +51,7 @@ Delete the first two to sign in again (and `liked`, `following` and `lists/` too
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
 | `src/update.rs` | the launch check for a newer GitHub release, and the update in place (the macOS app in /Applications reruns install.sh; Linux and Windows download the release with curl + tar and rename it over their own binary), then reopen |
 | `src/settings.rs` | reading and writing `~/.resona/settings` and `unplayable` |
+| `patches/block/` | block 0.1.6 (via souvlaki and cocoa) with its empty-enum extern static made an opaque struct, a future Rust error; drop it once souvlaki moves off block 0.1 |
 | `assets/` | bundled OFL fonts + licenses: DotGothic16 + VT323 (Wired), Archivo regular + extra-bold (Swiss), Courier Prime regular + bold (ASCII) |
 
 The Archivo files are static instances baked from the variable font with fontTools: egui only reads a variable

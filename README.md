@@ -59,9 +59,8 @@ resona          # the window; `resona cli` for the terminal player
 ```
 
 Older distributions can [build from source](#windows-and-linux). Needs ALSA and OpenSSL 3, which desktop
-installs already have (otherwise:
-`sudo apt install libasound2t64 libssl3`). If `resona` isn't found, add `~/.local/bin` to your `PATH`. Run the
-When a new version is out, Resona offers it at launch: click Update and it replaces itself and reopens.
+installs already have (otherwise: `sudo apt install libasound2t64 libssl3`). If `resona` isn't found, add
+`~/.local/bin` to your `PATH`. When a new version is out, Resona offers it at launch: click Update and it replaces itself and reopens.
 
 #### Windows
 
@@ -121,7 +120,7 @@ the library while it has songs. Media keys and Now Playing work there too. Press
 ## Files and signing in again
 
 Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `web_refresh_token` there to sign
-in again (and `liked` when switching Spotify accounts), and `client_id` to use another developer app. Setting
+in again (and `liked`, `following` and `lists/` too when switching Spotify accounts), and `client_id` to use another developer app. Setting
 `RESONA_CLIENT_ID` overrides the saved ID.
 
 ## Build from source
@@ -140,10 +139,6 @@ cd resona
 `bundle.sh` builds the release version (a few minutes the first time), puts `Resona.app` into `/Applications`
 and `resona` into `~/.local/bin`. To just run it: `cargo build --release && ./target/release/resona` (use the
 release build: the debug build decodes audio too slowly).
-
-Releases are made by setting the new `version` in `Cargo.toml`, then pushing a matching tag
-(`git tag v0.2.0 && git push --tags`): GitHub Actions builds the universal
-Mac app and the Linux and Windows binaries and attaches them to the release.
 
 ## Windows and Linux
 
