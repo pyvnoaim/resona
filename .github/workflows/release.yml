@@ -24,7 +24,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    # The write token goes only to the upload steps, never to the third-party actions (pinned to commits too).
+    # The write token goes only to the upload step, never to the build or the third-party actions (pinned to commits).
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,25 +36,22 @@ jobs:
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: macOS
+      # Build without the token (dependencies' build scripts run here), then upload with it.
+      - name: Build (macOS)
         if: runner.os == 'macOS'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./bundle.sh dist && gh release upload "$GITHUB_REF_NAME" target/Resona-macos.zip
-      - name: Linux
+        run: ./bundle.sh dist && mkdir dist && mv target/Resona-macos.zip dist/
+      - name: Build (Linux)
         if: runner.os == 'Linux'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cargo build --release
-          tar -czf resona-linux-x86_64.tar.gz -C target/release resona
-          gh release upload "$GITHUB_REF_NAME" resona-linux-x86_64.tar.gz
-      - name: Windows
+        run: cargo build --release && mkdir dist && tar -czf dist/resona-linux-x86_64.tar.gz -C target/release resona
+      - name: Build (Windows)
         if: runner.os == 'Windows'
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           cargo build --release
-          Compress-Archive target/release/resona.exe resona-windows-x86_64.zip
-          gh release upload "$env:GITHUB_REF_NAME" resona-windows-x86_64.zip
+          mkdir dist
+          Compress-Archive target/release/resona.exe dist/resona-windows-x86_64.zip
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*
