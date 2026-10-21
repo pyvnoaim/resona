@@ -68,12 +68,20 @@ pub fn install() -> JoinHandle<Result<(), String>> {
 /// curl and tar come with Linux and with Windows 10 and later; tar reads both the .tar.gz and the .zip.
 fn swap(exe: &Path, tmp: &Path, asset: &str) -> Result<(), String> {
     let archive = tmp.join(asset);
-    run(Command::new("curl").arg("-fsSL").arg(format!("https://github.com/{REPO}/releases/latest/download/{asset}")).arg("-o").arg(&archive))?;
-    run(Command::new("tar").arg("-xf").arg(&archive).arg("-C").arg(tmp))?;
+    run(Command::new(tool("curl")).arg("-fsSL").arg(format!("https://github.com/{REPO}/releases/latest/download/{asset}")).arg("-o").arg(&archive))?;
+    run(Command::new(tool("tar")).arg("-xf").arg(&archive).arg("-C").arg(tmp))?;
     let new: PathBuf = tmp.join(exe.file_name().unwrap_or_default());
     // A running binary can be renamed, not overwritten (Windows), so the old one steps aside first.
     if cfg!(windows) { std::fs::rename(exe, exe.with_extension("old")).map_err(|e| e.to_string())?; }
     std::fs::rename(&new, exe).map_err(|e| format!("{}: {e}", exe.display()))
+}
+
+/// Windows' own copy in System32, not one found by searching (which can start in Resona's folder).
+fn tool(name: &str) -> PathBuf {
+    match std::env::var_os("SystemRoot") {
+        Some(root) if cfg!(windows) => Path::new(&root).join("System32").join(format!("{name}.exe")),
+        _ => PathBuf::from(name),
+    }
 }
 
 fn run(cmd: &mut Command) -> Result<(), String> {
