@@ -651,6 +651,7 @@ impl eframe::App for App {
         self.toast(ctx);
         self.reveal = false;
         show_cursor(ctx);
+        screenshot(ctx);
 
         // Tick the clock only while music plays; idle costs nothing.
         if self.state.lock().unwrap().loading {
@@ -682,6 +683,28 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("resona", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// `RESONA_SHOT=<file.png>`: the window as it looks 15 s after launch, saved as a PNG, then closed. For the
+/// README's picture; egui reads its own frame, so no screen-recording permission is needed.
+fn screenshot(ctx: &egui::Context) {
+    static START: OnceLock<Instant> = OnceLock::new();
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(path) = std::env::var_os("RESONA_SHOT") else { return };
+    let start = *START.get_or_init(Instant::now);
+    let shot = ctx.input(|i| i.raw.events.iter().find_map(|e| match e {
+        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+        _ => None,
+    }));
+    if let Some(img) = shot {
+        let px = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+        let saved = image::RgbaImage::from_raw(img.size[0] as u32, img.size[1] as u32, px).map(|i| i.save(&path));
+        if !matches!(saved, Some(Ok(()))) { eprintln!("couldn't save the screenshot to {}", path.to_string_lossy()) }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    } else if start.elapsed() > Duration::from_secs(15) && !ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+    }
+    ctx.request_repaint_after(Duration::from_millis(500)); // keep frames coming while it waits
 }
 
 /// The icon's ink: the accent's dark-theme shade (the icon is dark).

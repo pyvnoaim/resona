@@ -14,6 +14,7 @@ cargo clippy --all-targets                            # keep it warning-free
 ./bundle.sh                                           # Resona.app (icon in your accent, Info.plist) into /Applications
 ./bundle.sh dist                                      # universal Resona.app zipped into target/, not installed
 ./target/release/resona cli                           # the same player full-screen in the terminal
+RESONA_SHOT=x.png ./target/release/resona            # the window 15 s after launch, saved, then quit (README's docs/skins.png)
 ```
 
 Releases: pushing a `v*` tag runs `.github/workflows/release.yml` (macOS zip from `bundle.sh dist`, Linux and

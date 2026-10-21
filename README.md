@@ -12,6 +12,10 @@
 
 [Install](#install) · [Features](#features) · [Use](#use) · [Build from source](#build-from-source)
 
+<img src="docs/skins.png" alt="Resona in its three skins: Wired, Swiss and ASCII" width="900">
+
+<sub>Wired · Swiss · ASCII</sub>
+
 </div>
 
 *Latin: resound!* Three skins, each with a dark and a light theme:
