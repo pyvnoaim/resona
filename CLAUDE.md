@@ -49,7 +49,7 @@ Delete the first two to sign in again (and `liked`, `following` and `lists/` too
 | `src/ui.rs` | the views: sidebar, track list, player bar, focus view, help overlay, sign-in screen |
 | `src/controls.rs` | input: keyboard, macOS menu bar (`muda`), media keys / Now Playing (`souvlaki`) |
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
-| `src/update.rs` | the launch check for a newer GitHub release, and the one-click update (macOS app in /Applications: reruns install.sh, reopens) |
+| `src/update.rs` | the launch check for a newer GitHub release, and the update in place (the macOS app in /Applications reruns install.sh; Linux and Windows download the release with curl + tar and rename it over their own binary), then reopen |
 | `src/settings.rs` | reading and writing `~/.resona/settings` and `unplayable` |
 | `assets/` | bundled OFL fonts + licenses: DotGothic16 + VT323 (Wired), Archivo regular + extra-bold (Swiss), Courier Prime regular + bold (ASCII) |
 

@@ -74,8 +74,8 @@ struct App {
     menu: Option<muda::Menu>,
     #[cfg(target_os = "macos")]
     menu_rx: std::sync::mpsc::Receiver<muda::MenuEvent>,
-    /// install.sh running after Update was clicked.
-    updating: Option<std::process::Child>,
+    /// The update downloading and installing after Update was clicked (`update::install`).
+    updating: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
 impl App {
@@ -136,31 +136,25 @@ impl App {
     /// The update dialog while a newer release is on offer, and install.sh once Update was clicked.
     fn offer_update(&mut self, ctx: &egui::Context) {
         let Some(tag) = self.state.lock().unwrap().update.clone() else { return };
-        if let Some(child) = &mut self.updating {
-            match child.try_wait() {
-                Ok(None) => ctx.request_repaint_after(Duration::from_millis(250)),
-                Ok(Some(done)) if done.success() => {
+        if self.updating.as_ref().is_some_and(|u| u.is_finished()) {
+            let done = self.updating.take().unwrap().join().unwrap_or_else(|_| Err("the update stopped".into()));
+            match done {
+                Ok(()) => {
                     update::reopen();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                done => {
-                    let mut why = String::new();
-                    if let Some(err) = child.stderr.as_mut() { let _ = std::io::Read::read_to_string(err, &mut why); }
-                    if why.trim().is_empty() { why = format!("{done:?}") }
+                Err(why) => {
                     let mut s = self.state.lock().unwrap();
                     s.update = None;
-                    s.say(format!("Couldn't update: {}", why.trim()), true);
-                    self.updating = None;
-                    return;
+                    s.say(format!("Couldn't update: {why}"), true);
                 }
             }
+            return;
         }
-        let one_click = update::one_click();
-        match ui::update_dialog(ctx, &tag, self.updating.is_some(), one_click) {
-            Some(true) if one_click => match update::install() {
-                Ok(child) => self.updating = Some(child),
-                Err(e) => self.state.lock().unwrap().say(format!("Couldn't update: {e}"), true),
-            },
+        if self.updating.is_some() { ctx.request_repaint_after(Duration::from_millis(250)) }
+        let in_place = update::in_place();
+        match ui::update_dialog(ctx, &tag, self.updating.is_some(), in_place) {
+            Some(true) if in_place => self.updating = Some(update::install()),
             Some(true) => {
                 ctx.open_url(egui::OpenUrl::new_tab(update::page(&tag)));
                 self.state.lock().unwrap().update = None;

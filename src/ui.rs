@@ -392,8 +392,8 @@ fn shortcut_labels_fit_the_platform() {
 
 /// The "?" overlay: every shortcut, grouped, in the skin's own window style.
 /// "Resona v0.2.0 is out": Update (`Some(true)`) or Later (`Some(false)`). `busy` while install.sh runs;
-/// `one_click` says whether Update installs it here or opens the release page.
-pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, one_click: bool) -> Option<bool> {
+/// `in_place` says whether Update installs it here or opens the release page.
+pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, in_place: bool) -> Option<bool> {
     let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
     let mut pick = None;
     egui::Area::new(egui::Id::new("update")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
@@ -404,9 +404,9 @@ pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, one_click: bool
             ui.add_space(8.0);
             ui.label(RichText::new(format!("Resona {tag} is out")).font(skin::title(22.0)).color(p.text));
             ui.add_space(6.0);
-            let how = match (busy, one_click) {
+            let how = match (busy, in_place) {
                 (true, _) => "Updating. Resona reopens when it's done.",
-                (false, true) => "Update now? Resona closes, installs it and reopens.",
+                (false, true) => "Update now? It downloads, installs, and Resona reopens.",
                 (false, false) => "Update opens the release page to download it.",
             };
             ui.label(RichText::new(how).size(13.0).color(p.dim));

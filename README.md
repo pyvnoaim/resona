@@ -61,7 +61,7 @@ resona          # the window; `resona cli` for the terminal player
 Older distributions can [build from source](#windows-and-linux). Needs ALSA and OpenSSL 3, which desktop
 installs already have (otherwise:
 `sudo apt install libasound2t64 libssl3`). If `resona` isn't found, add `~/.local/bin` to your `PATH`. Run the
-same commands again to update.
+When a new version is out, Resona offers it at launch: click Update and it replaces itself and reopens.
 
 #### Windows
 
@@ -71,8 +71,8 @@ same commands again to update.
    **More info**, then **Run anyway**. A console window opens next to Resona: leave it open, closing it quits
    Resona.
 
-`resona.exe cli` in a terminal starts the terminal player. To update, download the zip again and replace
-`resona.exe`.
+`resona.exe cli` in a terminal starts the terminal player. When a new version is out, Resona offers it at
+launch: click Update and it replaces itself and reopens.
 
 ### 2. Make your Spotify developer app
 
