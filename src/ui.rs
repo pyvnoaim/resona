@@ -86,10 +86,15 @@ pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, play: b
             ui.close();
         }
         ui.separator();
-        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+        let scroll = egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for (pid, name) in own_lists(s, me) {
                 let has = s.members.get(&pid).is_some_and(|m| m.contains(id));
-                let label = if has { format!("√ {name}") } else { name.clone() };
+                let label = match (has, skin::skin(ui.ctx()) == Skin::Ascii) {
+                    (true, true) => format!("[x] {name}"),
+                    (false, true) => format!("[ ] {name}"),
+                    (true, false) => format!("√ {name}"),
+                    (false, false) => name.clone(),
+                };
                 let r = ui.button(label);
                 if (if has { r.on_hover_text("In this playlist: click to take it out") } else { r }).clicked() {
                     out.add = Some((pid, name, id.clone(), !has));
@@ -97,6 +102,7 @@ pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, play: b
                 }
             }
         });
+        skin::char_scroll(ui, &scroll);
     });
     if ui.button("Go to song radio").clicked() {
         out.radio = Some(Source::Radio { track: id.clone(), name: t.name.clone() });
@@ -193,7 +199,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
             job.wrap = egui::text::TextWrapping::truncate_at_width(width);
             ui.painter().layout_job(job)
         };
-        let dot = cut(" · ".into(), room);
+        let dot = cut(skin::plain(sk, " · "), room);
         let artist = cut(t.artist_line(), (room * 0.6).max(room - dot.size().x - ui.painter().layout_no_wrap(t.album.name.clone(), font.clone(), p.dim).size().x));
         let album = cut(t.album.name.clone(), (room - artist.size().x - dot.size().x).max(0.0));
         let size = vec2(artist.size().x + dot.size().x + album.size().x, artist.size().y);
@@ -234,7 +240,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
                 let painter = ui.painter().with_clip_rect(rect);
                 let text = |j: isize| match usize::try_from(j).ok().and_then(|j| lines.get(j)) {
                     Some((_, w)) if !w.is_empty() => w.as_str(),
-                    _ if (-1..lines.len() as isize).contains(&j) => "♪",
+                    _ if (-1..lines.len() as isize).contains(&j) => if sk == Skin::Ascii { "~ ~ ~" } else { "♪" },
                     _ => "",
                 };
                 let lay = |j: isize, f: usize| {
@@ -273,13 +279,24 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
             }
             Some(Lyrics::Lines { lines, .. }) => {
                 // Not synced: the whole text, quietly, to scroll through.
-                egui::ScrollArea::vertical().max_height(full.bottom() - ui.cursor().top() - 20.0).show(ui, |ui| {
+                let scroll = egui::ScrollArea::vertical().max_height(full.bottom() - ui.cursor().top() - 20.0).show(ui, |ui| {
                     for (_, words) in lines {
                         ui.label(RichText::new(words).font(small_line.clone()).color(p.text));
                     }
                 });
+                skin::char_scroll(ui, &scroll);
             }
-            Some(Lyrics::Loading) => { ui.label(RichText::new(if caps { "LOADING LYRICS…" } else { "Loading lyrics…" }).font(small(sk)).color(p.dim)); }
+            Some(Lyrics::Loading) => {
+                let text = match sk {
+                    Skin::Ascii => {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(125)); // the spinner turns 8 times a second
+                        format!("{} LOADING LYRICS...", skin::spinner(ui.input(|i| i.time)))
+                    }
+                    _ if caps => "LOADING LYRICS…".into(),
+                    _ => "Loading lyrics…".into(),
+                };
+                ui.label(RichText::new(text).font(small(sk)).color(p.dim));
+            }
             Some(Lyrics::Missing) | None => {
                 skin::meter(ui, (full.width() * 0.5).min(560.0), 64.0, ui.input(|i| i.time), s.since.is_some());
                 let label = match sk { Skin::Wired => "NO LYRICS · 歌詞なし · UP NEXT >", Skin::Swiss => "No lyrics · Up next", Skin::Ascii => "NO LYRICS - UP NEXT >" };
@@ -360,14 +377,15 @@ pub fn up_next(ui: &mut egui::Ui, s: &State, pos: u32, centred: bool) -> Option<
     picked
 }
 
-/// A shortcut as this platform writes it: "⌘ F" on macOS, "Ctrl F" elsewhere.
-pub fn cmd_keys(s: &str) -> String {
-    if cfg!(target_os = "macos") { s.into() } else { s.replace("⌘ ", "Ctrl ").replace('⌘', "Ctrl+").replace('⇧', "Shift") }
+/// A shortcut as this platform writes it: "⌘ F" on macOS, "Ctrl F" elsewhere; ASCII spells it out ("CMD F").
+pub fn cmd_keys(sk: Skin, s: &str) -> String {
+    let s = if cfg!(target_os = "macos") { s.into() } else { s.replace("⌘ ", "Ctrl ").replace('⌘', "Ctrl+").replace('⇧', "Shift") };
+    skin::plain(sk, &s)
 }
 
 #[test]
 fn shortcut_labels_fit_the_platform() {
-    let (word, glued) = (cmd_keys("⌘ ⇧ C"), cmd_keys("Next (⌘→)"));
+    let (word, glued) = (cmd_keys(Skin::Wired, "⌘ ⇧ C"), cmd_keys(Skin::Wired, "Next (⌘→)"));
     if cfg!(target_os = "macos") { assert_eq!((word.as_str(), glued.as_str()), ("⌘ ⇧ C", "Next (⌘→)")) }
     else { assert_eq!((word.as_str(), glued.as_str()), ("Ctrl Shift C", "Next (Ctrl+→)")) }
 }
@@ -392,7 +410,7 @@ pub fn help_overlay(ctx: &egui::Context) {
                     ui.label(RichText::new(group.to_uppercase()).font(skin::num(13.0)).color(p.accent));
                     ui.end_row();
                     for (key, what) in keys {
-                        ui.label(RichText::new(cmd_keys(key)).font(skin::num(15.0)).color(p.text));
+                        ui.label(RichText::new(cmd_keys(sk, key)).font(skin::num(15.0)).color(p.text));
                         ui.label(RichText::new(*what).size(13.0).color(p.dim));
                         ui.end_row();
                     }
@@ -408,7 +426,7 @@ pub fn help_overlay(ctx: &egui::Context) {
 /// player bar.
 pub fn switches(ui: &mut egui::Ui, ctx: &egui::Context) {
     use egui::ThemePreference::{Dark, Light, System};
-    let r = skin::icon_button(ui, skin::Glyph::Menu, false).on_hover_text(cmd_keys("Skin and theme (⌘,)"));
+    let r = skin::icon_button(ui, skin::Glyph::Menu, false).on_hover_text(cmd_keys(skin::skin(ctx), "Skin and theme (⌘,)"));
     // ⌘, asks for the menu through a flag, since the shortcut isn't a click on this button.
     let asked = ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("open-menu"))).unwrap_or(false);
     if asked { egui::Popup::toggle_id(ctx, egui::Popup::default_response_id(&r)) }
@@ -595,7 +613,7 @@ pub fn boot(ui: &mut egui::Ui, status: &str, error: Option<&str>) {
             Skin::Ascii => (skin::num(15.0), 44.0),
         };
         ui.label(RichText::new("resona").font(brand).color(p.dim));
-        let r = ui.add(egui::Label::new(RichText::new(msg).font(skin::title(size)).color(if error.is_some() { p.accent } else { p.text })).wrap());
+        let r = ui.add(egui::Label::new(RichText::new(skin::plain(s, msg)).font(skin::title(size)).color(if error.is_some() { p.accent } else { p.text })).wrap());
         skin::cursor_after(ui, r.rect, 34.0);
         if let Some(stage) = stage {
             if s.blocky() {
@@ -659,7 +677,7 @@ impl App {
                     pick = Some(Source::Search(query.to_string()));
                 }
                 ui.add_space(match sk { Skin::Swiss => 12.0, _ => 4.0 });
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                let scroll = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = match sk { Skin::Swiss => 0.0, _ => 4.0 };
                     let mut row = |ui: &mut egui::Ui, n: usize, src: Source, img: Option<&str>, name: &str, owner: &str| {
                         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), l.side_row_h), Sense::click());
@@ -708,6 +726,7 @@ impl App {
                                     let ink = if selected || on { p.accent } else { p.text };
                                     child.add_sized(vec2(14.0, 20.0), egui::Label::new(RichText::new(if selected { ">" } else { " " }).font(skin::num(15.0)).color(p.accent)));
                                     child.add_sized(vec2(44.0, 20.0), egui::Label::new(RichText::new(format!("[{tag}]")).font(skin::num(14.0)).color(if selected { p.accent } else { p.dim })));
+                                    let name = skin::fit(&child, name.to_string(), &FontId::proportional(15.0), child.available_width());
                                     child.add(egui::Label::new(RichText::new(name).size(15.0).color(ink)).truncate());
                                 }
                                 Skin::Wired => {
@@ -744,6 +763,7 @@ impl App {
                         create = Some(std::mem::take(&mut self.new_list).trim().to_string());
                     }
                 });
+                skin::char_scroll(ui, &scroll);
             });
         });
         drop(s);
@@ -846,7 +866,9 @@ impl App {
                             Skin::Swiss => { ui.label(RichText::new(kind).font(skin::num(13.0)).color(p.text)); }
                             Skin::Ascii => { ui.label(RichText::new(kind).font(small(sk)).color(p.dim)); }
                         }
-                        let r = ui.add(egui::Label::new(RichText::new(&title).font(skin::title(l.title_size))).truncate());
+                        let shown = if sk == Skin::Ascii { skin::typed(ui.ctx(), &title, s.loading) } else { title.clone() };
+                        let shown = skin::fit(ui, shown, &skin::title(l.title_size), ui.available_width());
+                        let r = ui.add(egui::Label::new(RichText::new(shown).font(skin::title(l.title_size))).truncate());
                         skin::cursor_after(ui, r.rect, 40.0);
                         if sk == Skin::Swiss {
                             // The one red rule.
@@ -859,11 +881,16 @@ impl App {
                             Skin::Swiss => format!("{n} {unit}"),
                         };
                         match &s.error {
-                            Some(e) => { ui.label(RichText::new(format!("{count} · ERR: {}", short_err(e))).font(small(sk)).color(p.accent)).on_hover_text(e); }
+                            Some(e) => { ui.label(RichText::new(skin::plain(sk, &format!("{count} · ERR: {}", short_err(e)))).font(small(sk)).color(p.accent)).on_hover_text(e); }
                             None if s.loading => {
                                 ui.horizontal(|ui| {
                                     let of = s.expected.map_or("??".to_string(), |t| if sk.blocky() { format!("{t:02}") } else { t.to_string() });
                                     let done = if sk.blocky() { format!("{n:02}") } else { n.to_string() };
+                                    if sk == Skin::Ascii {
+                                        ui.label(RichText::new(skin::spinner(ui.input(|i| i.time)).to_string()).font(small(sk)).color(p.accent));
+                                        ui.label(RichText::new(format!("LOADING {done}/{of} {unit}")).font(small(sk)).color(p.dim));
+                                        return;
+                                    }
                                     ui.label(RichText::new(format!("{done}/{of} {unit}")).font(small(sk)).color(p.dim));
                                     ui.add_space(6.0);
                                     skin::progress(ui, 190.0, n, s.expected);
@@ -878,7 +905,7 @@ impl App {
                                     Some(l) => format!("{count} · {}", l.to_uppercase()),
                                     None => count,
                                 };
-                                ui.label(RichText::new(count).font(small(sk)).color(p.dim));
+                                ui.label(RichText::new(skin::plain(sk, &count)).font(small(sk)).color(p.dim));
                             }
                         }
                         if n > 0 && view != Source::Queue {
@@ -891,7 +918,7 @@ impl App {
                                 if s.tracks.iter().any(|t| t.added > 0) {
                                     let order = s.sort.label().unwrap_or("list order");
                                     let text = if caps { format!("SORT: {}", order.to_uppercase()) } else { format!("Sort: {order}") };
-                                    if skin::action_button(ui, &text, false).on_hover_text(cmd_keys("List order → newest added → oldest added (⌘O)")).clicked() { resort = true }
+                                    if skin::action_button(ui, &text, false).on_hover_text(cmd_keys(sk, "List order → newest added → oldest added (⌘O)")).clicked() { resort = true }
                                 }
                             });
                         }
@@ -906,7 +933,7 @@ impl App {
                     if let Some(a) = s.artist.as_ref().filter(|a| !a.releases.is_empty()) {
                         let wired = sk == Skin::Wired;
                         ui.label(RichText::new(if wired { "ALBUMS & EPS // ディスコグラフィ" } else { "ALBUMS & EPS" }).font(small(sk)).color(p.dim));
-                        egui::ScrollArea::horizontal().id_salt("releases").show(ui, |ui| {
+                        let scroll = egui::ScrollArea::horizontal().id_salt("releases").show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 16.0;
                                 for r in &a.releases {
@@ -933,6 +960,7 @@ impl App {
                                 }
                             });
                         });
+                        skin::char_scroll(ui, &scroll);
                         ui.add_space(12.0);
                         ui.label(RichText::new(if wired { "TOP SONGS // 人気" } else { "TOP SONGS" }).font(small(sk)).color(p.dim));
                     }
@@ -1026,6 +1054,7 @@ impl App {
                             let cell = |ui: &mut egui::Ui, from: f32, to: f32, text: String, size: f32, color| -> Rect {
                                 let cell = Rect::from_min_max(pos2(x + from, rect.top()), pos2(x + to, rect.bottom()));
                                 ui.put(cell, |ui: &mut egui::Ui| ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    let text = skin::fit(ui, text, &FontId::proportional(size), cell.width());
                                     ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).truncate())
                                 }).inner).rect
                             };
@@ -1072,10 +1101,11 @@ impl App {
                         }
                     };
                     // Artist pages scroll as a whole (strip + a short list); long lists only lay out visible rows.
-                    if artist_page { draw(ui, 0..total) } else { area.show_rows(ui, l.row_h, total, |ui, range| draw(ui, range)); }
+                    if artist_page { draw(ui, 0..total) } else { let scroll = area.show_rows(ui, l.row_h, total, |ui, range| draw(ui, range)); skin::char_scroll(ui, &scroll); }
                 };
                 if artist_page {
-                    egui::ScrollArea::vertical().id_salt("artist-page").auto_shrink(false).show(ui, rest);
+                    let scroll = egui::ScrollArea::vertical().id_salt("artist-page").auto_shrink(false).show(ui, rest);
+                    skin::char_scroll(ui, &scroll);
                 } else {
                     rest(ui);
                 }
@@ -1167,7 +1197,7 @@ impl App {
                 let art = skin::cover(ui, t.thumb(), size, Stamp::None, false);
                 let r = ui.interact(art, egui::Id::new("now-cover"), Sense::click());
                 r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys("Cover and lyrics (⌘E)")).clicked() {
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys(sk, "Cover and lyrics (⌘E)")).clicked() {
                     open_big = true;
                 }
                 // Name over artist, measured and centred on the cover (a nested vertical would sit at the top).
@@ -1190,7 +1220,7 @@ impl App {
                 ui.painter().galley(pos2(x, below), artist, p.dim);
                 let r = ui.interact(name_rect, egui::Id::new("now-text"), Sense::click());
                 r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys("Show in its list (⌘J)")).clicked() {
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys(sk, "Show in its list (⌘J)")).clicked() {
                     jump = true;
                 }
                 let r = link(ui, artist_rect, egui::Id::new("now-artist"), p.dim);
@@ -1198,7 +1228,7 @@ impl App {
                 if r.clicked() { goto = artist_of(t) }
                 if let Some(id) = &t.id {
                     let heart = Rect::from_center_size(pos2(x + text_w + 22.0, art.center().y), vec2(28.0, 28.0));
-                    if skin::heart_toggle(ui, heart, egui::Id::new("like-now"), s.liked.contains(id), true, false).on_hover_text(cmd_keys("⌘L")).clicked() {
+                    if skin::heart_toggle(ui, heart, egui::Id::new("like-now"), s.liked.contains(id), true, false).on_hover_text(cmd_keys(sk, "⌘L")).clicked() {
                         like_now = Some(id.clone());
                     }
                 }
@@ -1220,9 +1250,9 @@ impl App {
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.add_space((ui.available_width() - widths - 4.0 * gap) / 2.0);
                 toggle_shuffle = skin::icon_button(ui, skin::Glyph::Shuffle, shuffle).on_hover_text("Shuffle (S)").clicked();
-                if skin::ctl_button(ui, Ctl::Prev).on_hover_text(cmd_keys("Previous (⌘←)")).clicked() { cmds.push(Cmd::Prev) }
+                if skin::ctl_button(ui, Ctl::Prev).on_hover_text(cmd_keys(sk, "Previous (⌘←)")).clicked() { cmds.push(Cmd::Prev) }
                 if skin::ctl_button(ui, if playing { Ctl::Pause } else { Ctl::Play }).on_hover_text("Play / pause (space)").clicked() { cmds.push(Cmd::Toggle) }
-                if skin::ctl_button(ui, Ctl::Next).on_hover_text(cmd_keys("Next (⌘→)")).clicked() { cmds.push(Cmd::Next) }
+                if skin::ctl_button(ui, Ctl::Next).on_hover_text(cmd_keys(sk, "Next (⌘→)")).clicked() { cmds.push(Cmd::Next) }
                 let glyph = if repeat == Repeat::One { skin::Glyph::RepeatOne } else { skin::Glyph::Repeat };
                 let hint = match repeat { Repeat::Off => "Repeat: off (R)", Repeat::All => "Repeat: all (R)", Repeat::One => "Repeat: this song (R)" };
                 cycle_repeat = skin::icon_button(ui, glyph, repeat != Repeat::Off).on_hover_text(hint).clicked();
@@ -1265,7 +1295,7 @@ impl App {
                 }
             }
             ui.add_space(18.0);
-            if skin::icon_button(ui, skin::Glyph::Note, self.big).on_hover_text(cmd_keys("Cover and lyrics (⌘E, Esc goes back)")).clicked() {
+            if skin::icon_button(ui, skin::Glyph::Note, self.big).on_hover_text(cmd_keys(sk, "Cover and lyrics (⌘E, Esc goes back)")).clicked() {
                 self.big = !self.big;
             }
             ui.add_space(6.0);

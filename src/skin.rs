@@ -495,7 +495,51 @@ fn visuals(ctx: &egui::Context, skin: Skin) {
         // Scrollbars get their own lane, so they never sit on top of rows.
         s.spacing.scroll = egui::style::ScrollStyle::solid();
         s.interaction.selectable_labels = false; // so clicks reach the rows
+        // Ascii letters its own bar over egui's (`char_scroll`): egui's stays, unseen, to take the drag.
+        if skin == Skin::Ascii {
+            let sc = &mut s.spacing.scroll;
+            // Opacity only applies to floating bars; this one keeps the solid bar's own lane.
+            (sc.floating, sc.floating_allocated_width) = (true, sc.allocated_width());
+            (sc.dormant_background_opacity, sc.active_background_opacity, sc.interact_background_opacity) = (0.0, 0.0, 0.0);
+            (sc.dormant_handle_opacity, sc.active_handle_opacity, sc.interact_handle_opacity) = (0.0, 0.0, 0.0);
+        }
     });
+}
+
+/// Where a scrollbar's thumb sits in `n` cells: (first cell, length), for `seen` of `all` scrolled `offset` in.
+fn thumb(n: usize, seen: f32, all: f32, offset: f32) -> (usize, usize) {
+    let len = ((seen / all * n as f32).round() as usize).clamp(1, n);
+    (((offset / all * n as f32).round() as usize).min(n - len), len)
+}
+
+#[test]
+fn thumb_fills_its_share_and_stops_at_the_end() {
+    assert_eq!(thumb(10, 500.0, 1000.0, 0.0), (0, 5));
+    assert_eq!(thumb(10, 500.0, 1000.0, 500.0), (5, 5)); // scrolled to the end: flush with the bottom
+    assert_eq!(thumb(10, 10.0, 100_000.0, 99_990.0), (9, 1)); // a long list still shows one cell, last
+}
+
+/// Ascii's scrollbars, lettered over the lane of the scroll area `out` drew: a `:` rail with a `#` thumb down
+/// the side, a `-` rail with a `#` thumb along the bottom.
+pub fn char_scroll<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R>) {
+    if skin(ui.ctx()) != Skin::Ascii { return }
+    let (p, inner, lane) = (pal(ui.ctx()), out.inner_rect, ui.spacing().scroll.allocated_width());
+    let font = mono(11.0, true);
+    let c = cell(ui.painter(), &font);
+    // (cells, seen, all, offset, where the rail starts, the rail's character, between cells)
+    let bars = [
+        ((inner.height() / c.y) as usize, inner.height(), out.content_size.y, out.state.offset.y, pos2(inner.right() + lane / 2.0, inner.top()), ":", "\n"),
+        ((inner.width() / c.x) as usize, inner.width(), out.content_size.x, out.state.offset.x, pos2(inner.left(), inner.bottom() + lane / 2.0 - c.y / 2.0), "-", ""),
+    ];
+    for (n, seen, all, offset, at, rail, gap) in bars {
+        if n == 0 || all <= seen + 0.5 { continue }
+        let (top, len) = thumb(n, seen, all, offset);
+        let line = |on: bool, ch: &str| (0..n).map(|i| if (top..top + len).contains(&i) == on { ch } else { " " }).collect::<Vec<_>>().join(gap);
+        let align = if gap.is_empty() { egui::Align2::LEFT_TOP } else { egui::Align2::CENTER_TOP };
+        for (text, color) in [(line(false, rail), p.line), (line(true, "#"), p.dim)] {
+            ui.painter().text(at, align, text, font.clone(), color);
+        }
+    }
 }
 
 /// All bundled fonts are OFL (licenses in assets/).
@@ -607,13 +651,163 @@ fn char_art_is_the_lists_own_and_only_ramp_characters() {
     assert!(a.lines().all(|l| l.len() == 22) && a.bytes().all(|c| c == b'\n' || RAMP.contains(&c)));
 }
 
-/// Ascii's stand-in for every cover, filling `rect`.
-/// ponytail: never the real art (egui hands us textures, not pixels); dither the decoded image if that's wanted.
-fn char_cover(painter: &egui::Painter, rect: Rect, seed: &str, color: Color32) {
-    let font = mono((rect.width() / 18.0).clamp(7.0, 14.0), true);
+/// How sharp a brightness step must be (Sobel, on 0..1) to be drawn as an outline instead of a shade.
+const EDGE: f32 = 1.6;
+
+/// A real cover in characters, `cols` × `rows`, the way image-to-ASCII converters do it: each cell's brightness,
+/// stretched to the picture's own range and S-curved so mid-tones split, picks a ramp character, and a sharp step
+/// is drawn as an outline (`- | / \`) along its direction. `dark`: light ink on black, so bright is dense.
+fn image_art(img: &image::GrayImage, cols: usize, rows: usize, dark: bool) -> String {
+    let img = image::imageops::resize(img, cols.max(1) as u32, rows.max(1) as u32, image::imageops::FilterType::Triangle);
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let (lo, hi) = img.pixels().fold((255u8, 0u8), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
+    let span = hi.saturating_sub(lo).max(1) as f32;
+    let at = |x: i32, y: i32| (img.get_pixel(x.clamp(0, w - 1) as u32, y.clamp(0, h - 1) as u32)[0] - lo) as f32 / span;
+    let grad = |x: i32, y: i32| {
+        let gx = at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2.0 * at(x - 1, y) - at(x - 1, y + 1);
+        // ponytail: a cell taken as twice as tall as wide; pass the font's real cell if diagonals come out skewed
+        let gy = (at(x - 1, y + 1) + 2.0 * at(x, y + 1) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2.0 * at(x, y - 1) - at(x + 1, y - 1)) * 0.5;
+        (gx, gy)
+    };
+    let mag = |x: i32, y: i32| { let (gx, gy) = grad(x, y); gx.hypot(gy) };
+    let ch = |x: i32, y: i32| {
+        let (gx, gy) = grad(x, y);
+        let m = gx.hypot(gy);
+        // A step lights the cells on both sides of it: only the stronger one, across the edge, draws the line.
+        let (dx, dy) = if gx.abs() >= gy.abs() { (1, 0) } else { (0, 1) };
+        if m > EDGE && m >= mag(x - dx, y - dy) && m > mag(x + dx, y + dy) {
+            // The edge runs across the gradient; y points down, so 45° is "\\".
+            return match (gy.atan2(gx).to_degrees() + 90.0).rem_euclid(180.0) {
+                e if !(22.5..157.5).contains(&e) => '-',
+                e if e < 67.5 => '\\',
+                e if e < 112.5 => '|',
+                _ => '/',
+            };
+        }
+        let t = at(x, y);
+        let t = t * t * (3.0 - 2.0 * t);
+        RAMP[((if dark { t } else { 1.0 - t }) * 9.99) as usize] as char
+    };
+    (0..h).map(|y| (0..w).map(|x| ch(x, y)).collect::<String>()).collect::<Vec<_>>().join("\n")
+}
+
+/// A downloaded cover, decoded once and kept small and grey: all `image_art` needs at any size.
+fn cover_luma(bytes: &[u8]) -> Option<std::sync::Arc<image::GrayImage>> {
+    Some(std::sync::Arc::new(image::load_from_memory(bytes).ok()?.thumbnail(192, 192).to_luma8()))
+}
+
+#[test]
+fn image_art_shades_flat_areas_and_outlines_steps() {
+    let mut img = image::GrayImage::new(4, 2);
+    for x in 2..4 { for y in 0..2 { img.put_pixel(x, y, image::Luma([255])) } } // black left half, white right
+    assert_eq!(image_art(&img, 4, 2, true), "  |@\n  |@"); // one line per step, not two
+    assert_eq!(image_art(&img, 4, 2, false), "@@| \n@@| ");
+    assert!(cover_luma(b"not an image").is_none());
+}
+
+#[test]
+#[ignore] // RESONA_COVER=some.jpg cargo test cover_preview -- --ignored --nocapture
+fn cover_preview() {
+    let bytes = std::fs::read(std::env::var("RESONA_COVER").unwrap()).unwrap();
+    let img = cover_luma(&bytes).unwrap();
+    for (c, r) in [(36, 18), (10, 5)] { println!("{}\n", image_art(&img, c, r, false)) }
+}
+
+/// Ascii's cover, filling `rect`: the art at `url` in characters once it's downloaded, the list's own `char_art`
+/// until then (and for lists without a picture).
+fn char_cover(painter: &egui::Painter, rect: Rect, url: Option<&str>, seed: &str, color: Color32) {
+    let font = mono((rect.width() / 36.0).clamp(7.0, 14.0), true); // ~36 columns on big covers; under 7pt small ones blur to grey
     let c = cell(painter, &font);
-    let art = char_art(seed, (rect.width() / c.x) as usize, (rect.height() / c.y) as usize);
+    let (cols, rows) = ((rect.width() / c.x) as usize, (rect.height() / c.y) as usize);
+    let ctx = painter.ctx();
+    let dark = ctx.theme() == egui::Theme::Dark;
+    // Each cover is decoded once (a broken one is kept as None, like egui's own loader keeps the error), and its
+    // characters are kept for the last size and theme drawn: one entry per cover, redone only when those change.
+    type Art = (usize, usize, bool, std::sync::Arc<String>);
+    let real = url.and_then(|u| {
+        let (luma_id, art_id) = (egui::Id::new(("cover-luma", u)), egui::Id::new(("char_cover", u)));
+        if let Some((c, r, d, art)) = ctx.data(|m| m.get_temp::<Art>(art_id)) && (c, r, d) == (cols, rows, dark) { return Some(art) }
+        let luma = match ctx.data(|m| m.get_temp::<Option<std::sync::Arc<image::GrayImage>>>(luma_id)) {
+            Some(luma) => luma,
+            None => match ctx.try_load_bytes(u) {
+                Ok(egui::load::BytesPoll::Pending { .. }) => return None,
+                done => {
+                    let luma = done.ok().and_then(|b| match b { egui::load::BytesPoll::Ready { bytes, .. } => cover_luma(&bytes), _ => None });
+                    ctx.data_mut(|m| m.insert_temp(luma_id, luma.clone()));
+                    luma
+                }
+            },
+        }?;
+        let art = std::sync::Arc::new(image_art(&luma, cols, rows, dark));
+        ctx.data_mut(|m| m.insert_temp::<Art>(art_id, (cols, rows, dark, art.clone())));
+        Some(art)
+    });
+    let art = real.map_or_else(|| char_art(seed, cols, rows), |a| a.to_string());
     painter.with_clip_rect(rect).text(rect.min, egui::Align2::LEFT_TOP, art, font, color);
+}
+
+/// ASCII's text in 7 bits: the few typographic marks the other skins use, spelled out. Other skins get `text` back.
+pub fn plain(s: Skin, text: &str) -> String {
+    if s != Skin::Ascii { return text.into() }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '·' => out.push('-'),
+            '…' => out.push_str("..."),
+            '√' => out.push('x'),
+            '♪' => out.push('~'),
+            '⌘' => out.push_str("CMD"),
+            '⇧' => out.push_str("SHIFT"),
+            '→' => out.push_str("->"),
+            '←' => out.push_str("<-"),
+            '↑' => out.push_str("UP"),
+            '↓' => out.push_str("DOWN"),
+            '▶' => out.push('>'),
+            '◀' => out.push('<'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[test]
+fn plain_spells_marks_out_for_ascii_only() {
+    assert_eq!(plain(Skin::Ascii, "26 TRACKS · 51 MIN"), "26 TRACKS - 51 MIN");
+    assert_eq!(plain(Skin::Ascii, "Next (⌘→) · Loading…"), "Next (CMD->) - Loading...");
+    assert!(plain(Skin::Ascii, "⌘ ⇧ C ↑ ↓ ← → √ ♪ ▶ ◀ · …").is_ascii());
+    assert_eq!(plain(Skin::Wired, "a · b…"), "a · b…");
+}
+
+/// ASCII cuts `text` to whole characters ending in `...` when it's wider than `width` (egui's own cut mark is
+/// the 8-bit `…`); the font is monospaced, so characters are cells. Other skins get `text` back.
+pub fn fit(ui: &egui::Ui, text: String, font: &FontId, width: f32) -> String {
+    if skin(ui.ctx()) != Skin::Ascii || ui.painter().layout_no_wrap(text.clone(), font.clone(), Color32::PLACEHOLDER).size().x <= width {
+        return text;
+    }
+    let n = ((width / cell(ui.painter(), font).x) as usize).saturating_sub(3);
+    format!("{}...", text.chars().take(n).collect::<String>().trim_end())
+}
+
+/// The teletype spinner, `| / - \`, turning 8 times a second.
+pub fn spinner(t: f64) -> char {
+    ['|', '/', '-', '\\'][(t * 8.0) as usize % 4]
+}
+
+/// ASCII's loading title, typed out a character every 1/30 s from when this title began loading; all of it otherwise.
+pub fn typed(ctx: &egui::Context, text: &str, typing: bool) -> String {
+    let id = egui::Id::new("typed");
+    if !typing {
+        ctx.data_mut(|d| d.remove::<(String, f64)>(id));
+        return text.into();
+    }
+    let now = ctx.input(|i| i.time);
+    // Kept with its title, so opening another list mid-load types that one from the start.
+    let start = ctx.data_mut(|d| {
+        let at = d.get_temp_mut_or_insert_with(id, || (text.to_string(), now));
+        if at.0 != text { *at = (text.to_string(), now) }
+        at.1
+    });
+    text.chars().take(((now - start) * 30.0) as usize).collect()
 }
 
 // ---------- vector glyphs (Swiss)
@@ -675,31 +869,23 @@ fn dither(painter: &egui::Painter, rect: Rect, tone: Color32) {
 /// Swiss: a flat surface under one rule, black when done, red for an error. `left` (1 → 0) drains the bar under it.
 pub fn toast(ctx: &egui::Context, text: &str, error: bool, left: f32) -> Response {
     let (p, s, l) = (pal(ctx), skin(ctx), look(ctx));
-    let flag = if error { p.accent } else { p.online };
     if s == Skin::Ascii {
-        // A boxed line, `[OK]` or `[ERR]` first; the bottom rule drains as `=`.
+        // A printed line, no box: `*** note ***` in ink, `>> ERR: …` in the accent.
+        let text = plain(s, text);
+        let line = if error { format!(">> ERR: {text}") } else { format!("*** {text} ***") };
         return egui::Area::new(egui::Id::new("toast")).order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-(l.edge as f32 + 14.0), -(l.player_h + 14.0)))
             .show(ctx, |ui| {
-                let rect = egui::Frame::new().fill(p.panel).inner_margin(egui::Margin { left: 18, right: 18, top: 20, bottom: 20 }).show(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(if error { "[ERR]" } else { "[OK]" }).font(mono(15.0, true)).color(flag));
-                        ui.add(egui::Label::new(RichText::new(text).font(mono(15.0, false)).color(p.text)).truncate());
-                    });
+                let rect = egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                    ui.set_max_width(520.0);
+                    let line = fit(ui, line, &mono(15.0, true), 520.0);
+                    ui.add(egui::Label::new(RichText::new(line).font(mono(15.0, true)).color(if error { p.accent } else { p.text })).truncate());
                 }).response.rect;
-                let painter = ui.painter();
-                char_box(painter, rect, None, if error { p.accent } else { p.line }, p.text, p.panel);
-                let font = mono(14.0, false);
-                let c = cell(painter, &font);
-                let n = ((rect.width() / c.x) as usize).saturating_sub(2);
-                let drain = Rect::from_min_size(pos2(rect.left() + c.x, rect.bottom() - c.y), vec2(n as f32 * c.x, c.y));
-                painter.rect_filled(drain, 0.0, p.panel);
-                painter.text(drain.min, egui::Align2::LEFT_TOP, "=".repeat((n as f32 * left.clamp(0.0, 1.0)) as usize), font, flag);
                 ui.interact(rect, egui::Id::new("toast-click"), Sense::click())
             })
             .inner;
     }
+    let flag = if error { p.accent } else { p.online };
     egui::Area::new(egui::Id::new("toast"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-(l.edge as f32 + 14.0), -(l.player_h + 14.0)))
@@ -849,11 +1035,11 @@ pub fn cover(ui: &mut egui::Ui, url: Option<&str>, size: f32, stamp: Stamp, big:
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     if s == Skin::Ascii {
-        // Character art, the list's own, with its tag lettered in the corner on the paper.
+        // The cover in characters; a list without a picture gets its own art with its tag lettered in the corner.
         let tag = match stamp { Stamp::Liked => "<3", Stamp::Queue => "Q", Stamp::Search => "?", Stamp::New => "NR", Stamp::Text(t) => t, Stamp::None => "" };
         let painter = ui.painter();
-        char_cover(painter, rect, url.unwrap_or(tag), if big { p.text } else { p.dim });
-        if !tag.is_empty() {
+        char_cover(painter, rect, url, url.unwrap_or(tag), if big { p.text } else { p.dim });
+        if url.is_none() && !tag.is_empty() {
             let g = painter.layout_no_wrap(format!("[{tag}]"), mono((size * 0.16).max(13.0), true), p.accent);
             let at = Rect::from_min_size(rect.left_bottom() - vec2(0.0, g.size().y), g.size() + vec2(4.0, 0.0));
             painter.rect_filled(at, 0.0, p.panel);
@@ -949,6 +1135,12 @@ fn queue_glyph(painter: &egui::Painter, c: Pos2, w: f32, color: Color32, pixel: 
 
 // ---------- rows
 
+/// Whether the playing row and the play buttons are accent blocks: Wired's always are; ASCII prints its marks in
+/// the accent instead, except under the Mono accent, which leaves no colour to print in.
+fn fills(p: &Pal, s: Skin) -> bool {
+    s == Skin::Wired || s == Skin::Ascii && p.accent == p.text
+}
+
 /// Background of a track row, and the colours for its text.
 pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color32, Color32) {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
@@ -968,9 +1160,11 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color
             painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, p.line));
         }
         Skin::Ascii => {
-            if current { painter.rect_filled(rect, 0.0, p.selected); }
+            // A teletype can't print a block: the playing row is printed in the accent instead (`fills`).
+            let block = current && fills(p, s);
+            if block { painter.rect_filled(rect, 0.0, p.selected); }
             if hovered {
-                let (font, ink) = (mono(16.0, true), if current { p.on_selected } else { p.accent });
+                let (font, ink) = (mono(16.0, true), if block { p.on_selected } else { p.accent });
                 painter.text(rect.left_center() + vec2(2.0, 0.0), egui::Align2::LEFT_CENTER, "[", font.clone(), ink);
                 painter.text(rect.right_center() - vec2(2.0, 0.0), egui::Align2::RIGHT_CENTER, "]", font, ink);
             }
@@ -978,6 +1172,7 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color
     }
     match (s, current) {
         (Skin::Swiss, true) => (p.on_selected, p.on_selected),
+        (Skin::Ascii, true) if !fills(p, s) => (p.accent, p.accent),
         (Skin::Wired | Skin::Ascii, true) => (p.on_selected, p.on_selected.gamma_multiply(0.85)),
         _ => (p.text, p.dim),
     }
@@ -988,7 +1183,8 @@ pub fn row_bg(ui: &egui::Ui, rect: Rect, current: bool, hovered: bool) -> (Color
 pub fn heart_toggle(ui: &mut egui::Ui, rect: Rect, id: egui::Id, on: bool, show_off: bool, current: bool) -> Response {
     let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
     let r = ui.interact(rect, id, Sense::click());
-    let lit = if current { p.on_selected } else { p.accent }; // the highlighted row is accent-filled in Wired and ASCII
+    let current = current && fills(p, s); // on the accent-filled row the heart is drawn in the row's ink
+    let lit = if current { p.on_selected } else { p.accent };
     let off = if current { p.on_selected.gamma_multiply(0.45) } else { p.dim.gamma_multiply(0.6) };
     let color = if on { Some(lit) } else if r.hovered() { Some(lit.gamma_multiply(0.75)) } else if show_off { Some(off) } else { None };
     if let Some(color) = color {
@@ -1005,8 +1201,8 @@ pub fn heart_toggle(ui: &mut egui::Ui, rect: Rect, id: egui::Id, on: bool, show_
 /// while `playing` (time `t`) and rest when paused.
 pub fn now_mark(painter: &egui::Painter, at: Pos2, color: Color32, s: Skin, playing: bool, t: f64) {
     if s == Skin::Ascii {
-        // `>`, blinking while paused.
-        if playing || (t * 2.0) as i64 % 2 == 0 { painter.text(at, egui::Align2::LEFT_CENTER, ">", mono(18.0, true), color); }
+        // `>>`, blinking while paused.
+        if playing || (t * 2.0) as i64 % 2 == 0 { painter.text(at, egui::Align2::LEFT_CENTER, ">>", mono(18.0, true), color); }
         return;
     }
     for i in 0..3 {
@@ -1099,11 +1295,11 @@ pub fn ctl_button(ui: &mut egui::Ui, ctl: Ctl) -> Response {
             painter.text(c, egui::Align2::CENTER_CENTER, text, font, ink);
         }
         Skin::Ascii => {
-            let text = match ctl { Ctl::Prev => "[<<]", Ctl::Next => "[>>]", Ctl::Play => "[ > ]", Ctl::Pause => "[ || ]" };
-            let ink = if main {
+            let text = match ctl { Ctl::Prev => "[<<]", Ctl::Next => "[>>]", Ctl::Play => "[>]", Ctl::Pause => "[||]" };
+            let ink = if main && fills(p, s) {
                 painter.rect_filled(rect, 0.0, if hover { p.accent.gamma_multiply(0.85) } else { p.accent });
                 p.on_accent
-            } else if hover { p.accent } else { p.text };
+            } else if main != hover { p.accent } else { p.text }; // play/pause printed in the accent; hover swaps
             painter.text(c, egui::Align2::CENTER_CENTER, text, mono(17.0, true), ink);
         }
     }
@@ -1236,6 +1432,7 @@ pub fn action_button(ui: &mut egui::Ui, text: &str, primary: bool) -> Response {
             painter.hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0_f32, if primary || hover { p.accent } else { p.text }));
             if primary { p.accent } else { p.text }
         }
+        Skin::Ascii if primary && !fills(p, s) => if hover { p.text } else { p.accent },
         Skin::Wired | Skin::Ascii if primary => {
             painter.rect_filled(rect, 0.0, if hover { p.accent.gamma_multiply(0.85) } else { p.accent });
             p.on_accent

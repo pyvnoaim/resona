@@ -127,4 +127,4 @@ font's default instance.
 - Non-trivial logic gets one small `#[test]` next to it.
 - Every skin must keep working: anything drawn goes through `skin.rs`, and `skin::every_skin_lays_out_text_in_every_font`
   catches a font that fails to load. ASCII draws its frames, bars and covers as text (`char_box`, `char_bar`,
-  `char_cover`) and never shows real cover art.
+  `char_cover`: the real art turned into characters; `char_scroll` letters over egui's unseen scrollbar) and never shows an image.
