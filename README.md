@@ -31,15 +31,47 @@ and a free Spotify developer app of your own (step 2).
 
 ### 1. Install Resona
 
-On a Mac (Apple silicon or Intel), paste this into Terminal:
+| | how | you get |
+|---|---|---|
+| **macOS** 11+ (Apple silicon or Intel) | [one command](#macos) | `Resona.app` + `resona` in the terminal |
+| **Linux** x86_64 (Ubuntu 24.04, Debian 13, Fedora 40 or newer) | [download and unpack](#linux) | `resona` |
+| **Windows** 10/11 x64 | [download and unzip](#windows) | `resona.exe` |
+| anything else | [build from source](#build-from-source) | |
+
+#### macOS
+
+Paste this into Terminal:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pyvnoaim/resona/main/install.sh | sh
 ```
 
-It puts `Resona.app` into `/Applications` and the terminal player `resona` into `~/.local/bin`. Run it again to
-update. On Linux and Windows, download a build from the
-[releases page](https://github.com/pyvnoaim/resona/releases/latest) (see [Windows and Linux](#windows-and-linux)).
+Resona is now in Applications and Spotlight, and `resona` in a terminal starts the terminal player. Run the same
+command again to update.
+
+#### Linux
+
+```sh
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/pyvnoaim/resona/releases/latest/download/resona-linux-x86_64.tar.gz | tar -xz -C ~/.local/bin
+resona          # the window; `resona cli` for the terminal player
+```
+
+Older distributions can [build from source](#windows-and-linux). Needs ALSA and OpenSSL 3, which desktop
+installs already have (otherwise:
+`sudo apt install libasound2t64 libssl3`). If `resona` isn't found, add `~/.local/bin` to your `PATH`. Run the
+same commands again to update.
+
+#### Windows
+
+1. Download [`resona-windows-x86_64.zip`](https://github.com/pyvnoaim/resona/releases/latest/download/resona-windows-x86_64.zip)
+   and unzip it anywhere, for example into `C:\Users\<you>\Apps\Resona`.
+2. Double-click `resona.exe`. The build isn't signed, so SmartScreen may say "Windows protected your PC": click
+   **More info**, then **Run anyway**. A console window opens next to Resona: leave it open, closing it quits
+   Resona.
+
+`resona.exe cli` in a terminal starts the terminal player. To update, download the zip again and replace
+`resona.exe`.
 
 ### 2. Make your Spotify developer app
 
@@ -55,7 +87,7 @@ development mode to their owner, so everyone makes their own. It's free and take
 
 ### 3. First launch
 
-Open Resona from Applications or Spotlight. It asks for the client ID: paste it and click Connect. Your browser
+Open Resona (on Linux and Windows: run `resona` / `resona.exe`). It asks for the client ID: paste it and click Connect. Your browser
 then opens twice to sign in, once for playback and once for your app. After that Resona signs in by itself.
 
 The terminal version asks for the client ID the same way: run `resona cli`.
@@ -113,14 +145,14 @@ Mac app and the Linux and Windows binaries and attaches them to the release.
 
 ## Windows and Linux
 
-Resona builds there too (checked on every push), but it's only used day to day on macOS, so expect rough
-edges. Ready-made builds are on the [releases page](https://github.com/pyvnoaim/resona/releases/latest). What's different:
+Resona runs there too (built and tested on every push), but it's only used day to day on macOS, so expect
+rough edges. What's different:
 
 - No menu bar: the same shortcuts use Ctrl instead of ⌘ (press `?` for the list).
 - Media keys: Linux yes (MPRIS, so desktop media controls work); Windows not yet.
 - No app bundle: a plain `resona` binary (Windows: `resona.exe`).
 
-To build it yourself:
+To build it yourself (with [Rust](https://rustup.rs)):
 
 ```sh
 # Linux (Debian/Ubuntu) only: audio and TLS libraries
@@ -130,8 +162,7 @@ cargo build --release
 ./target/release/resona          # Windows: target\release\resona.exe
 ```
 
-Resona keeps its files in `~/.resona` (on Windows `C:\Users\<you>\.resona`). The first-launch steps are the
-same as on the Mac.
+Resona keeps its files in `~/.resona` (on Windows `C:\Users\<you>\.resona`).
 
 ## License
 
