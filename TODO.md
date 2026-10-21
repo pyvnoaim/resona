@@ -27,8 +27,6 @@
 - [ ] egui's image cache keeps every cover it decoded until quit; `ctx.forget_image` on the list being left
       would cap memory over long sessions.
 - [ ] The whole window redraws at 20 fps while the playing row's equaliser is on screen.
-- [ ] ASCII never shows real cover art (egui hands over textures, not pixels): dither the decoded image to
-      `skin::RAMP` if wanted. Cut-off names still end in `…`, egui's elision character, which isn't 7-bit.
 - [ ] Courier is wide, so long playlist names in the ASCII sidebar are cut early.
 - [ ] The accent swatches take the mouse only (no arrow keys yet), and the menu bar's Accent submenu has no
       custom colour.

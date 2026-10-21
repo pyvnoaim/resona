@@ -4,6 +4,7 @@
 
 **A small native Spotify player for macOS.** Rust, [egui](https://github.com/emilk/egui) and
 [librespot](https://github.com/librespot-org/librespot): no Electron, no web view.
+Needs **Spotify Premium**.
 
 [![build](https://github.com/pyvnoaim/resona/actions/workflows/build.yml/badge.svg)](https://github.com/pyvnoaim/resona/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/pyvnoaim/resona?sort=semver)](https://github.com/pyvnoaim/resona/releases/latest)
@@ -26,8 +27,8 @@
 
 ## Install
 
-You need Spotify **Premium** (playback goes through librespot, which Spotify only allows for Premium accounts)
-and a free Spotify developer app of your own (step 2).
+You need Spotify **Premium**: playback goes through librespot, which Spotify only allows for Premium accounts
+(it doesn't work with free accounts). You also need a free Spotify developer app of your own (step 2).
 
 ### 1. Install Resona
 
