@@ -665,7 +665,9 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result {
     // librespot says why a song failed only in its log: `RUST_LOG=warn ./resona 2>resona.log`.
-    env_logger::init();
+    let log = env_logger::Builder::from_default_env().build();
+    log::set_max_level(log.filter());
+    let _ = log::set_boxed_logger(Box::new(Log(log)));
     if std::env::args().nth(1).as_deref() == Some("cli") {
         cli::run();
         return Ok(());
@@ -683,6 +685,51 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("resona", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// env_logger, plus one catch: librespot ends the whole process (`exit(1)`) when a free account signs in, and
+/// says why only in its log. Its error comes just before the exit, so this says it to the user first.
+struct Log(env_logger::Logger);
+
+impl log::Log for Log {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        self.0.enabled(m)
+    }
+    fn log(&self, r: &log::Record) {
+        self.0.log(r);
+        if free_account(r.target(), &r.args().to_string()) { premium_needed() }
+    }
+    fn flush(&self) {
+        self.0.flush()
+    }
+}
+
+/// librespot's last words before it quits over the account: `librespot does not support "free" accounts.`
+fn free_account(target: &str, msg: &str) -> bool {
+    target.starts_with("librespot_core::session") && msg.contains("does not support") && msg.contains("accounts")
+}
+
+#[test]
+fn free_account_is_told_by_librespots_error() {
+    assert!(free_account("librespot_core::session", r#"librespot does not support "free" accounts."#));
+    assert!(!free_account("librespot_core::session", "Connecting to AP"));
+    assert!(!free_account("resona", r#"librespot does not support "free" accounts."#));
+}
+
+/// Shown on the way out: the window gets a dialog (macOS) and the terminal a line.
+// ponytail: Linux and Windows windows only print to stderr; a native dialog there needs a new dependency.
+fn premium_needed() {
+    const WHY: &str = "Resona plays through librespot, which Spotify allows for Premium accounts only, and this \
+        account is on Spotify Free. To sign in with another account, delete credentials.json in ~/.resona.";
+    let cli = std::env::args().nth(1).as_deref() == Some("cli");
+    if cli { cli::leave_terminal() }
+    #[cfg(target_os = "macos")]
+    if !cli {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &format!("display alert \"Resona needs Spotify Premium\" message \"{WHY}\" as critical")])
+            .status();
+    }
+    eprintln!("Resona needs Spotify Premium. {WHY}");
 }
 
 /// `RESONA_SHOT=<file.png>`: the window as it looks 15 s after launch, saved as a PNG, then closed. For the

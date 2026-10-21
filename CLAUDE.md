@@ -123,6 +123,9 @@ font's default instance.
   macOS and Linux (MPRIS over zbus), in the window and the CLI (`controls::media_controls`, shared; the CLI turns
   the main run loop itself, where macOS delivers them); Windows needs an HWND, not wired yet. `.github/workflows/build.yml` builds
   all three on every push: the only check that Windows and Linux still compile.
+- **Free accounts:** librespot calls `exit(1)` when a non-Premium account signs in, saying why only in its log.
+  `main`'s logger (`Log`) catches that error line and tells the user first (`premium_needed`: an alert on macOS,
+  the terminal handed back and a line in the CLI, stderr elsewhere).
 - Errors are stored raw in `State.error` (or an error toast's `Notice`) and shown through `short_err()` (full text on hover).
 
 ## Conventions

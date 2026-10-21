@@ -988,6 +988,11 @@ impl Term {
     }
 }
 
+/// Hands the terminal back (main screen, cursor, cooked mode) from outside the player, before a forced exit.
+pub fn leave_terminal() {
+    drop(Term)
+}
+
 impl Drop for Term {
     fn drop(&mut self) {
         print!("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l");
