@@ -1,19 +1,31 @@
 #!/bin/sh
 # Builds Resona.app (pixel-speaker icon, Info.plist) and installs it into /Applications.
+# `./bundle.sh dist` builds a universal (Apple silicon + Intel) app into target/Resona-macos.zip instead,
+# without installing: what the release workflow uploads.
 set -e
 cd "$(dirname "$0")"
-cargo build --release
+if [ "$1" = dist ]; then
+  cargo build --release --target aarch64-apple-darwin
+  cargo build --release --target x86_64-apple-darwin
+  mkdir -p target/universal
+  lipo -create -output target/universal/resona \
+    target/aarch64-apple-darwin/release/resona target/x86_64-apple-darwin/release/resona
+  bin=target/universal/resona
+else
+  cargo build --release
+  bin=target/release/resona
+fi
 
 app=target/Resona.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/resona "$app/Contents/MacOS/"
+cp "$bin" "$app/Contents/MacOS/"
 
 # The icon: the pixel speaker in your accent colour (red unless you picked another), drawn by the binary
 # itself (`resona icon`: raw 1024px RGBA) and wrapped as a PNG here with stdlib only.
 set=target/icon.iconset
 rm -rf "$set" && mkdir "$set"
-target/release/resona icon | python3 -I -c '
+"$bin" icon | python3 -I -c '
 import struct, sys, zlib
 N = 1024
 px = sys.stdin.buffer.read()
@@ -43,6 +55,12 @@ cat > "$app/Contents/Info.plist" <<EOF
 EOF
 
 codesign --force --deep -s - "$app"
+if [ "$1" = dist ]; then
+  rm -f target/Resona-macos.zip
+  ditto -c -k --norsrc --noextattr --noacl --keepParent "$app" target/Resona-macos.zip
+  echo "built target/Resona-macos.zip"
+  exit
+fi
 rm -rf /Applications/Resona.app
 mv "$app" /Applications/   # move, not copy: a second copy in target/ shows up in Spotlight
 touch /Applications/Resona.app   # nudge Finder/Dock to pick up the new icon

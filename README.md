@@ -1,13 +1,60 @@
+<div align="center">
+
 # Resona
 
-*Latin: resound!* A small native Spotify player for macOS, written in Rust with
-[egui](https://github.com/emilk/egui) and [librespot](https://github.com/librespot-org/librespot).
+**A small native Spotify player for macOS.** Rust, [egui](https://github.com/emilk/egui) and
+[librespot](https://github.com/librespot-org/librespot): no Electron, no web view.
 
-Three skins, each with a dark and a light theme:
+[![build](https://github.com/pyvnoaim/resona/actions/workflows/build.yml/badge.svg)](https://github.com/pyvnoaim/resona/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/pyvnoaim/resona?sort=semver)](https://github.com/pyvnoaim/resona/releases/latest)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![macOS · Linux · Windows](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey)
+
+[Install](#install) · [Features](#features) · [Use](#use) · [Build from source](#build-from-source)
+
+</div>
+
+*Latin: resound!* Three skins, each with a dark and a light theme:
 
 - **Wired**: cyber/pixel, black and red, in the spirit of *Serial Experiments Lain*. The default.
 - **Swiss**: print grid, huge type, one red rule.
 - **ASCII**: a teletype printout. Every frame, bar, heart and cover is drawn in plain characters, in Courier.
+
+## Install
+
+You need Spotify **Premium** (playback goes through librespot, which Spotify only allows for Premium accounts)
+and a free Spotify developer app of your own (step 2).
+
+### 1. Install Resona
+
+On a Mac (Apple silicon or Intel), paste this into Terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/pyvnoaim/resona/main/install.sh | sh
+```
+
+It puts `Resona.app` into `/Applications` and the terminal player `resona` into `~/.local/bin`. Run it again to
+update. On Linux and Windows, download a build from the
+[releases page](https://github.com/pyvnoaim/resona/releases/latest) (see [Windows and Linux](#windows-and-linux)).
+
+### 2. Make your Spotify developer app
+
+Resona reads your library through a small app of your own on Spotify's developer site. Spotify limits apps in
+development mode to their owner, so everyone makes their own. It's free and takes two minutes:
+
+1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), sign in with your Spotify
+   account and accept the developer terms.
+2. Click **Create app**. Any name and description will do (for example "Resona").
+3. Under **Redirect URIs**, add exactly `http://127.0.0.1:8898/login` and click Add.
+4. Under **Which API/SDKs are you planning to use?**, tick **Web API**. Accept the terms and click **Save**.
+5. Open the app's **Settings** and copy its **Client ID**. You don't need the client secret.
+
+### 3. First launch
+
+Open Resona from Applications or Spotlight. It asks for the client ID: paste it and click Connect. Your browser
+then opens twice to sign in, once for playback and once for your app. After that Resona signs in by itself.
+
+The terminal version asks for the client ID the same way: run `resona cli`.
 
 ## Features
 
@@ -22,55 +69,6 @@ Three skins, each with a dark and a light theme:
 - Six accent colours or your own hex colour (menu or ⌘,): hover a swatch to try it on the whole app, click to
   keep it. Your own colour is shaded per theme so it stays readable. The terminal version and the app icon follow it
 - Remembers skin, theme, accent, volume and the last open list
-
-## Requirements
-
-- A Mac (Windows and Linux build too, with fewer extras: see [Windows and Linux](#windows-and-linux))
-- Spotify **Premium**: playback goes through librespot, which Spotify only allows for Premium accounts
-- Your own Spotify developer app: free, made in step 3 below
-
-## Install
-
-### 1. Install the tools
-
-Xcode's command line tools (for the compiler and git) and Rust:
-
-```sh
-xcode-select --install
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Open a new terminal afterwards, so `cargo` is on your path.
-
-### 2. Build and install Resona
-
-```sh
-git clone https://github.com/pyvnoaim/resona.git
-cd resona
-./bundle.sh
-```
-
-`bundle.sh` builds the release version (a few minutes the first time), puts `Resona.app` into `/Applications`
-and the terminal version `resona` into `~/.local/bin`. Run it again after pulling updates.
-
-### 3. Make your Spotify developer app
-
-Resona reads your library through a small app of your own on Spotify's developer site. Spotify limits apps in
-development mode to their owner, so everyone makes their own. It's free and takes two minutes:
-
-1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), sign in with your Spotify
-   account and accept the developer terms.
-2. Click **Create app**. Any name and description will do (for example "Resona").
-3. Under **Redirect URIs**, add exactly `http://127.0.0.1:8898/login` and click Add.
-4. Under **Which API/SDKs are you planning to use?**, tick **Web API**. Accept the terms and click **Save**.
-5. Open the app's **Settings** and copy its **Client ID**. You don't need the client secret.
-
-### 4. First launch
-
-Open Resona from Applications or Spotlight. It asks for the client ID: paste it and click Connect. Your browser
-then opens twice to sign in, once for playback and once for your app. After that Resona signs in by itself.
-
-The terminal version asks for the client ID the same way: run `resona cli`.
 
 ## Use
 
@@ -89,23 +87,36 @@ Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `w
 in again (and `liked` when switching Spotify accounts), and `client_id` to use another developer app. Setting
 `RESONA_CLIENT_ID` overrides the saved ID.
 
-## Building by hand
+## Build from source
+
+Needs Xcode's command line tools and [Rust](https://rustup.rs):
 
 ```sh
-cargo build --release
-./target/release/resona
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+git clone https://github.com/pyvnoaim/resona.git
+cd resona
+./bundle.sh
 ```
 
-Use the release build: the debug build decodes audio too slowly.
+`bundle.sh` builds the release version (a few minutes the first time), puts `Resona.app` into `/Applications`
+and `resona` into `~/.local/bin`. To just run it: `cargo build --release && ./target/release/resona` (use the
+release build: the debug build decodes audio too slowly).
+
+Releases are made by pushing a tag (`git tag v0.2.0 && git push --tags`): GitHub Actions builds the universal
+Mac app and the Linux and Windows binaries and attaches them to the release.
 
 ## Windows and Linux
 
-Resona builds there too (checked on every push by GitHub Actions), but it's only used day to day on macOS, so
-expect rough edges. What's different:
+Resona builds there too (checked on every push), but it's only used day to day on macOS, so expect rough
+edges. Ready-made builds are on the [releases page](https://github.com/pyvnoaim/resona/releases/latest). What's different:
 
 - No menu bar: the same shortcuts use Ctrl instead of ⌘ (press `?` for the list).
 - Media keys: Linux yes (MPRIS, so desktop media controls work); Windows not yet.
-- No `bundle.sh`: build and run it directly.
+- No app bundle: a plain `resona` binary (Windows: `resona.exe`).
+
+To build it yourself:
 
 ```sh
 # Linux (Debian/Ubuntu) only: audio and TLS libraries

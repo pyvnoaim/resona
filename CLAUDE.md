@@ -12,8 +12,12 @@ cargo build --release && ./target/release/resona   # use release: debug decodes 
 cargo test
 cargo clippy --all-targets                            # keep it warning-free
 ./bundle.sh                                           # Resona.app (icon in your accent, Info.plist) into /Applications
+./bundle.sh dist                                      # universal Resona.app zipped into target/, not installed
 ./target/release/resona cli                           # the same player full-screen in the terminal
 ```
+
+Releases: pushing a `v*` tag runs `.github/workflows/release.yml` (macOS zip from `bundle.sh dist`, Linux and
+Windows binaries); `install.sh` (the README's `curl … | sh`) installs the latest macOS zip.
 
 Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~/.resona/`:
 

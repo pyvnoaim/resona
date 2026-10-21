@@ -1,0 +1,60 @@
+name: release
+
+# Pushing a tag like v0.2.0 makes a GitHub release with ready-made builds: a universal Resona.app for the Mac
+# (what install.sh downloads), and plain binaries for Linux and Windows.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Resona $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    # The write token goes only to the upload steps, never to the third-party actions (pinned to commits too).
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Linux libraries (audio, TLS)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: macOS
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./bundle.sh dist && gh release upload "$GITHUB_REF_NAME" target/Resona-macos.zip
+      - name: Linux
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cargo build --release
+          tar -czf resona-linux-x86_64.tar.gz -C target/release resona
+          gh release upload "$GITHUB_REF_NAME" resona-linux-x86_64.tar.gz
+      - name: Windows
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          cargo build --release
+          Compress-Archive target/release/resona.exe resona-windows-x86_64.zip
+          gh release upload "$env:GITHUB_REF_NAME" resona-windows-x86_64.zip
