@@ -2,7 +2,7 @@
 
 # Resona
 
-**A small native Spotify player for macOS.** Rust, [egui](https://github.com/emilk/egui) and
+**A small native Spotify player for macOS, Linux and Windows.** Rust, [egui](https://github.com/emilk/egui) and
 [librespot](https://github.com/librespot-org/librespot): no Electron, no web view.
 Needs **Spotify Premium**.
 
