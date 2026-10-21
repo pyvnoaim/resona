@@ -391,6 +391,38 @@ fn shortcut_labels_fit_the_platform() {
 }
 
 /// The "?" overlay: every shortcut, grouped, in the skin's own window style.
+/// "Resona v0.2.0 is out": Update (`Some(true)`) or Later (`Some(false)`). `busy` while install.sh runs;
+/// `one_click` says whether Update installs it here or opens the release page.
+pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, one_click: bool) -> Option<bool> {
+    let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
+    let mut pick = None;
+    egui::Area::new(egui::Id::new("update")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+        let stroke = Stroke::new(1.0_f32, if sk == Skin::Wired { p.accent } else { p.line });
+        egui::Frame::new().fill(p.panel).stroke(stroke).inner_margin(egui::Margin::same(22)).show(ui, |ui| {
+            ui.set_max_width(380.0);
+            ui.label(RichText::new(match sk { Skin::Wired => "UPDATE // 更新", Skin::Ascii => "UPDATE", Skin::Swiss => "Update" }).font(small(sk)).color(p.dim));
+            ui.add_space(8.0);
+            ui.label(RichText::new(format!("Resona {tag} is out")).font(skin::title(22.0)).color(p.text));
+            ui.add_space(6.0);
+            let how = match (busy, one_click) {
+                (true, _) => "Updating. Resona reopens when it's done.",
+                (false, true) => "Update now? Resona closes, installs it and reopens.",
+                (false, false) => "Update opens the release page to download it.",
+            };
+            ui.label(RichText::new(how).size(13.0).color(p.dim));
+            ui.hyperlink_to(RichText::new("What's new").size(13.0).color(p.accent), crate::update::page(tag));
+            ui.add_space(12.0);
+            if !busy {
+                ui.horizontal(|ui| {
+                    if skin::action_button(ui, "Update", true).clicked() { pick = Some(true) }
+                    if skin::action_button(ui, "Later", false).clicked() { pick = Some(false) }
+                });
+            }
+        });
+    });
+    pick
+}
+
 pub fn help_overlay(ctx: &egui::Context) {
     let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
     let groups: [(&str, &[(&str, &str)]); 5] = [

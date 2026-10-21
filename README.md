@@ -47,8 +47,8 @@ Paste this into Terminal:
 curl -fsSL https://raw.githubusercontent.com/pyvnoaim/resona/main/install.sh | sh
 ```
 
-Resona is now in Applications and Spotlight, and `resona` in a terminal starts the terminal player. Run the same
-command again to update.
+Resona is now in Applications and Spotlight, and `resona` in a terminal starts the terminal player. When a new
+version is out, Resona offers it at launch: click Update and it installs it and reopens.
 
 #### Linux
 
@@ -141,7 +141,8 @@ cd resona
 and `resona` into `~/.local/bin`. To just run it: `cargo build --release && ./target/release/resona` (use the
 release build: the debug build decodes audio too slowly).
 
-Releases are made by pushing a tag (`git tag v0.2.0 && git push --tags`): GitHub Actions builds the universal
+Releases are made by setting the new `version` in `Cargo.toml`, then pushing a matching tag
+(`git tag v0.2.0 && git push --tags`): GitHub Actions builds the universal
 Mac app and the Linux and Windows binaries and attaches them to the release.
 
 ## Windows and Linux

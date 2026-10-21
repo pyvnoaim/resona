@@ -17,7 +17,8 @@ cargo clippy --all-targets                            # keep it warning-free
 RESONA_SHOT=x.png ./target/release/resona            # the window 15 s after launch, saved, then quit (README's docs/skins.png)
 ```
 
-Releases: pushing a `v*` tag runs `.github/workflows/release.yml` (macOS zip from `bundle.sh dist`, Linux and
+Releases: bump `version` in Cargo.toml, then push the matching `v*` tag (the workflow refuses a mismatch: the
+app's update check compares the two). The tag runs `.github/workflows/release.yml` (macOS zip from `bundle.sh dist`, Linux and
 Windows binaries); `install.sh` (the README's `curl … | sh`) installs the latest macOS zip.
 
 Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~/.resona/`:
@@ -48,6 +49,7 @@ Delete the first two to sign in again (and `liked`, `following` and `lists/` too
 | `src/ui.rs` | the views: sidebar, track list, player bar, focus view, help overlay, sign-in screen |
 | `src/controls.rs` | input: keyboard, macOS menu bar (`muda`), media keys / Now Playing (`souvlaki`) |
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
+| `src/update.rs` | the launch check for a newer GitHub release, and the one-click update (macOS app in /Applications: reruns install.sh, reopens) |
 | `src/settings.rs` | reading and writing `~/.resona/settings` and `unplayable` |
 | `assets/` | bundled OFL fonts + licenses: DotGothic16 + VT323 (Wired), Archivo regular + extra-bold (Swiss), Courier Prime regular + bold (ASCII) |
 

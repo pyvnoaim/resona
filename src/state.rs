@@ -160,6 +160,8 @@ pub struct State {
     pub members_asked: bool,
     /// A short note shown as a toast ("Added to …"), until it runs out or is clicked away.
     pub notice: Option<Notice>,
+    /// A newer release's tag (`update::check`), offered in a dialog until it's taken or put off.
+    pub update: Option<String>,
     /// Lyrics for one track id, for the big now-playing view.
     pub lyrics: Option<(String, Lyrics)>,
     pub shuffle: bool,

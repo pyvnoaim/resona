@@ -9,6 +9,7 @@ mod settings;
 mod skin;
 mod state;
 mod ui;
+mod update;
 
 use std::{
     sync::{Arc, OnceLock},
@@ -73,6 +74,8 @@ struct App {
     menu: Option<muda::Menu>,
     #[cfg(target_os = "macos")]
     menu_rx: std::sync::mpsc::Receiver<muda::MenuEvent>,
+    /// install.sh running after Update was clicked.
+    updating: Option<std::process::Child>,
 }
 
 impl App {
@@ -109,6 +112,7 @@ impl App {
             menu_rx: std::sync::mpsc::channel().1,
             setup: None,
             icon_accent: None,
+            updating: None,
         };
         #[cfg(target_os = "macos")]
         app.attach_menu(&cc.egui_ctx);
@@ -120,7 +124,50 @@ impl App {
             Some(_) => app.start(&cc.egui_ctx),
             None => app.setup = Some(String::new()),
         }
+        let (state, ctx) = (app.state.clone(), cc.egui_ctx.clone());
+        app.rt.spawn(async move {
+            let Some(tag) = update::check(&reqwest::Client::new()).await else { return };
+            state.lock().unwrap().update = Some(tag);
+            ctx.request_repaint();
+        });
         app
+    }
+
+    /// The update dialog while a newer release is on offer, and install.sh once Update was clicked.
+    fn offer_update(&mut self, ctx: &egui::Context) {
+        let Some(tag) = self.state.lock().unwrap().update.clone() else { return };
+        if let Some(child) = &mut self.updating {
+            match child.try_wait() {
+                Ok(None) => ctx.request_repaint_after(Duration::from_millis(250)),
+                Ok(Some(done)) if done.success() => {
+                    update::reopen();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                done => {
+                    let mut why = String::new();
+                    if let Some(err) = child.stderr.as_mut() { let _ = std::io::Read::read_to_string(err, &mut why); }
+                    if why.trim().is_empty() { why = format!("{done:?}") }
+                    let mut s = self.state.lock().unwrap();
+                    s.update = None;
+                    s.say(format!("Couldn't update: {}", why.trim()), true);
+                    self.updating = None;
+                    return;
+                }
+            }
+        }
+        let one_click = update::one_click();
+        match ui::update_dialog(ctx, &tag, self.updating.is_some(), one_click) {
+            Some(true) if one_click => match update::install() {
+                Ok(child) => self.updating = Some(child),
+                Err(e) => self.state.lock().unwrap().say(format!("Couldn't update: {e}"), true),
+            },
+            Some(true) => {
+                ctx.open_url(egui::OpenUrl::new_tab(update::page(&tag)));
+                self.state.lock().unwrap().update = None;
+            }
+            Some(false) => self.state.lock().unwrap().update = None,
+            None => {}
+        }
     }
 
     /// Signs in and connects, in the background.
@@ -648,6 +695,7 @@ impl eframe::App for App {
         let center = if self.big { ground(0, 0, 0, 0) } else { ground(half, edge, g, half) };
         egui::CentralPanel::default().frame(center).show(ctx, |ui| self.tracklist(ui));
         if self.help { help_overlay(ctx) }
+        self.offer_update(ctx);
         self.toast(ctx);
         self.reveal = false;
         show_cursor(ctx);
