@@ -45,6 +45,7 @@ impl App {
                 &item("jump", "Jump to the Playing Song", Some("CmdOrCtrl+J")),
                 &item("focus", "Cover and Lyrics", Some("CmdOrCtrl+E")),
                 &item("sort", "Sort: List Order / Newest / Oldest Added", Some("CmdOrCtrl+O")),
+                &item("goback", "Back to the Last List (Esc)", Some("CmdOrCtrl+BracketLeft")),
                 &sep(),
                 &skins,
                 &themes,
@@ -100,6 +101,7 @@ impl App {
                 "jump" => self.jump_to_playing(ctx),
                 "focus" => self.big = !self.big,
                 "sort" => self.state.lock().unwrap().cycle_sort(),
+                "goback" => self.go_back(ctx),
                 "settings" => ctx.data_mut(|d| d.insert_temp(egui::Id::new("open-menu"), true)),
                 "like" => if let Some(id) = now_id { self.toggle_like(id) },
                 "copy" => if let Some(id) = now_id { ctx.copy_text(format!("https://open.spotify.com/track/{id}")) },
@@ -167,6 +169,7 @@ impl App {
     pub fn keys(&mut self, ctx: &egui::Context) {
         use egui::Key;
         let tab = std::mem::take(&mut self.tab);
+        if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1)) { self.go_back(ctx) } // the mouse's back button
         if ctx.wants_keyboard_input() { return }
         if !tab && !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { .. }))) { return } // no key, nothing to do
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
@@ -174,7 +177,7 @@ impl App {
         // Not while the key is held: a repeated L would be a burst of likes, a repeated Enter of restarts.
         let once = |k: Key| ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == k)));
         if hit(Key::Escape) {
-            if self.help { self.help = false } else { self.big = false }
+            if self.help { self.help = false } else if self.big { self.big = false } else if !egui::Popup::is_any_open(ctx) { self.go_back(ctx) }
         }
         if hit(Key::Questionmark) || (shift && hit(Key::Slash)) { self.help = !self.help }
         if hit(Key::Space) { self.command(Cmd::Toggle) }
@@ -196,6 +199,7 @@ impl App {
             }
             if hit(Key::Comma) { ctx.data_mut(|d| d.insert_temp(egui::Id::new("open-menu"), true)) }
             if hit(Key::O) { self.state.lock().unwrap().cycle_sort() }
+            if hit(Key::OpenBracket) { self.go_back(ctx) }
             return;
         }
         if hit(Key::ArrowRight) { self.command(Cmd::SeekBy(10_000)) }

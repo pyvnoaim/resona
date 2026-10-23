@@ -38,6 +38,8 @@ struct App {
     new_list: String,
     /// The big now-playing view (cover + lyrics) instead of the list.
     big: bool,
+    /// The lists opened before this one, latest last: Esc, ⌘[ and the mouse's back button return to them.
+    back: Vec<Source>,
     /// Set while drawing a frame if the bouncing now-playing bars were on screen.
     bars_shown: std::cell::Cell<bool>,
     /// "Jump to the playing song": scroll the list to this track id once it's there.
@@ -91,6 +93,7 @@ impl App {
             query: String::new(),
             new_list: String::new(),
             big: false,
+            back: Vec::new(),
             bars_shown: Default::default(),
             jump: None,
             title: String::new(),
@@ -176,8 +179,19 @@ impl App {
     }
 
     fn open(&mut self, src: Source, ctx: &egui::Context) {
-        if self.state.lock().unwrap().view.as_ref() != Some(&src) { self.row = 0 } // a new list: cursor to its top
-        if let Some(e) = self.engine.get() { open_list(self.rt.handle(), e, &self.state, src, ctx) }
+        let Some(e) = self.engine.get() else { return };
+        let view = self.state.lock().unwrap().view.clone();
+        if view.as_ref() == Some(&src) { return }
+        self.back.extend(view);
+        self.row = 0; // a new list: cursor to its top
+        open_list(self.rt.handle(), e, &self.state, src, ctx);
+    }
+
+    /// Back to the list open before this one, if there was one.
+    fn go_back(&mut self, ctx: &egui::Context) {
+        let (Some(e), Some(src)) = (self.engine.get(), self.back.pop()) else { return };
+        (self.big, self.row) = (false, 0);
+        open_list(self.rt.handle(), e, &self.state, src, ctx);
     }
 
     fn command(&mut self, cmd: Cmd) {

@@ -130,6 +130,24 @@ fn link(ui: &egui::Ui, at: Rect, id: egui::Id, color: egui::Color32) -> egui::Re
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A song's artist line (`artist_line`, drawn at `at` in `size`) as one link per name: the one under the
+/// pointer is underlined and, clicked, gives its page.
+fn artist_link(ui: &egui::Ui, t: &api::Track, at: Rect, size: f32, id: egui::Id, color: egui::Color32) -> (egui::Response, Option<Source>) {
+    let x = ui.input(|i| i.pointer.hover_pos()).map_or(at.left(), |p| p.x);
+    let width = |text: &str| ui.painter().layout_no_wrap(text.into(), FontId::proportional(size), color).size().x;
+    let (mut line, mut from, mut hit) = (String::new(), at.left(), (at, artist_of(t)));
+    for a in &t.artists {
+        if !line.is_empty() { line += ", "; from = at.left() + width(&line) }
+        line += &a.name;
+        let to = (at.left() + width(&line)).min(at.right());
+        hit = (Rect::from_x_y_ranges(from..=to, at.y_range()), a.id.clone().map(|id| Source::Artist { id, name: a.name.clone() }));
+        if x < to || to >= at.right() { break } // under the pointer, or the rest was cut off
+    }
+    let r = link(ui, hit.0, id, color);
+    let to = if r.clicked() { hit.1 } else { None };
+    (r, to)
+}
+
 /// Playlists a track can be added to: yours and the collaborative ones, the ones you last added to first.
 pub fn own_lists(s: &State, me: &str) -> Vec<(String, String)> {
     let mut own: Vec<_> = s.playlists.iter().filter(|pl| pl.web_readable(me)).map(|pl| (pl.id.clone(), pl.name.clone())).collect();
@@ -222,7 +240,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         ui.painter().galley(line.min + vec2(artist.size().x, 0.0), dot, p.dim);
         ui.painter().galley(artist_at.min, artist, p.dim);
         ui.painter().galley(album_at.min, album, p.dim);
-        if link(ui, artist_at, egui::Id::new("focus-artist"), p.dim).clicked() { out.goto = artist_of(t) }
+        if let (_, Some(to)) = artist_link(ui, t, artist_at, 15.0, egui::Id::new("focus-artist"), p.dim) { out.goto = Some(to) }
         if link(ui, album_at, egui::Id::new("focus-album"), p.dim).clicked() { out.goto = album_of(t) }
         let line = ui.interact(line, egui::Id::new("focus-line"), Sense::hover());
         if let Some(id) = &t.id {
@@ -442,7 +460,7 @@ pub fn help_overlay(ctx: &egui::Context) {
         ("Playback", &[("Space", "Play / pause"), ("⌘ →", "Next song"), ("⌘ ←", "Previous song"), ("→  ←", "Forward / back 10 s"), ("S", "Shuffle on / off"), ("R", "Repeat: off / all / one")]),
         ("Move", &[("↑  ↓", "Up / down (J K too)"), ("Tab", "Sidebar / songs"), ("Enter", "Open the list / play the song"), ("PgUp PgDn", "Ten rows"), ("Home End", "Top / bottom")]),
         ("Volume", &[("+  -", "Louder / quieter"), ("M", "Mute / unmute")]),
-        ("Find & go", &[("⌘ F", "Search Spotify"), ("⌘ J", "Jump to the playing song"), ("⌘ E", "Cover + lyrics view"), ("Esc", "Back / close")]),
+        ("Find & go", &[("⌘ F", "Search Spotify"), ("⌘ J", "Jump to the playing song"), ("⌘ E", "Cover + lyrics view"), ("Esc  ⌘ [", "Close / back to the last list")]),
         ("This song", &[("⌘ L", "Like / unlike"), ("L", "Like / unlike the highlighted song"), ("⌘ ⇧ C", "Copy song link"), ("Q", "Add the highlighted song to the queue"), ("⌘ ,", "Skin & theme menu"), ("?", "This list")]),
     ];
     egui::Area::new(egui::Id::new("help")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
@@ -1137,12 +1155,11 @@ impl App {
                             let mut link = |ui: &mut egui::Ui, at: Rect, key: &str, to: Option<Source>, color| {
                                 if let Some(to) = to && link(ui, at, egui::Id::new((key, i)), color).clicked() { goto = Some(to) }
                             };
-                            let (artist_page, album_page) = (artist_of(t), album_of(t));
-                            if one_line {
+                            let to_artist = if one_line {
                                 let name = t.name.clone();
                                 cell(ui, c_title, c_artist - 12.0, name, cell_size, ink);
                                 let at = cell(ui, c_artist, c_album - 12.0, t.artist_line(), cell_size, sub);
-                                link(ui, at, "artist", artist_page.clone(), sub);
+                                artist_link(ui, t, at, cell_size, egui::Id::new(("artist", i)), sub).1
                             } else {
                                 // Title over artist, measured and centred in the row so neither touches its edges.
                                 let big = 14.0;
@@ -1158,10 +1175,11 @@ impl App {
                                 ui.painter().galley(pos2(x + c_title, top), name, ink);
                                 let at = Rect::from_min_size(pos2(x + c_title, below), artist.size());
                                 ui.painter().galley(pos2(x + c_title, below), artist, sub);
-                                link(ui, at, "artist", artist_page.clone(), sub);
-                            }
+                                artist_link(ui, t, at, big - 2.5, egui::Id::new(("artist", i)), sub).1
+                            };
                             let at = cell(ui, c_album, c_dur - 70.0, t.album.name.clone(), if one_line { cell_size } else { 12.0 }, sub);
-                            link(ui, at, "album", album_page, sub);
+                            link(ui, at, "album", album_of(t), sub);
+                            if to_artist.is_some() { goto = to_artist }
                             ui.painter().text(pos2(x + c_dur, y), egui::Align2::RIGHT_CENTER, mmss(t.duration_ms, sk.blocky()), time_font.clone(), sub);
                             if let Some(id) = &t.id {
                                 let heart = Rect::from_center_size(pos2(x + c_dur - 56.0, y), vec2(26.0, 26.0));
@@ -1299,9 +1317,9 @@ impl App {
                 if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys(sk, "Show in its list (⌘J)")).clicked() {
                     jump = true;
                 }
-                let r = link(ui, artist_rect, egui::Id::new("now-artist"), p.dim);
+                let (r, to) = artist_link(ui, t, artist_rect, 11.5, egui::Id::new("now-artist"), p.dim);
                 r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
-                if r.clicked() { goto = artist_of(t) }
+                if to.is_some() { goto = to }
                 if let Some(id) = &t.id {
                     let heart = Rect::from_center_size(pos2(x + text_w + 22.0, art.center().y), vec2(28.0, 28.0));
                     if skin::heart_toggle(ui, heart, egui::Id::new("like-now"), s.liked.contains(id), true, false).on_hover_text(cmd_keys(sk, "⌘L")).clicked() {
