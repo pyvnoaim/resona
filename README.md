@@ -60,7 +60,8 @@ resona          # the window; `resona cli` for the terminal player
 
 Older distributions can [build from source](#windows-and-linux). Needs ALSA and OpenSSL 3, which desktop
 installs already have (otherwise: `sudo apt install libasound2t64 libssl3`). If `resona` isn't found, add
-`~/.local/bin` to your `PATH`. When a new version is out, Resona offers it at launch: click Update and it replaces itself and reopens.
+`~/.local/bin` to your `PATH`. When a new version is out, Resona offers it at launch: click Update and it replaces
+itself and reopens.
 
 #### Windows
 
@@ -87,17 +88,20 @@ development mode to their owner, so everyone makes their own. It's free and take
 
 ### 3. First launch
 
-Open Resona (on Linux and Windows: run `resona` / `resona.exe`). It asks for the client ID: paste it and click Connect. Your browser
-then opens twice to sign in, once for playback and once for your app. After that Resona signs in by itself.
+Open Resona (on Linux and Windows: run `resona` / `resona.exe`). It asks for the client ID: paste it and click
+Connect. Your browser then opens twice to sign in, once for playback and once for your app. After that Resona
+signs in by itself.
 
 The terminal version asks for the client ID the same way: run `resona cli`.
 
 ## Features
 
 - Liked Songs, your playlists, playlists you follow but don't own, artist and album pages
-- New releases: songs from the last two weeks' releases by the artists you follow
+- Artist pages with monthly listeners, followers, popularity, their next shows and similar artists
+- New releases: songs from the last two weeks' releases by the artists you follow, grouped by release day
 - Song radio: similar songs to any song (right-click → Go to song radio)
-- Search across Spotify
+- Search across Spotify: songs, artists, albums and playlists, with a filter for each; save someone else's
+  playlist to your library from its page
 - Queue, shuffle, repeat
 - Like and unlike songs, add songs to playlists or a new one (right-click, also on the playing song)
 - Big cover view with synced lyrics; artist and album names open their pages
@@ -115,13 +119,14 @@ playlists and song radio. Press `?` for every shortcut. Media keys and Control C
 and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit. It does most of
 what the window does: `a` / `A` queue a song or play it next, `p` adds it to a playlist, `v` shows the lyrics,
 `i` starts a song radio, `g` / `G` open the artist / album, `c` copies the link, `m` mutes, and the queue shows in
-the library while it has songs. Media keys and Now Playing work there too. Press `?` for every key.
+the library while it has songs. `f` steps through a search's artists, albums and playlists, or an artist's similar
+artists and shows. Media keys and Now Playing work there too. Press `?` for every key.
 
 ## Files and signing in again
 
 Everything Resona stores lives in `~/.resona/`. Delete `credentials.json` and `web_refresh_token` there to sign
-in again (and `liked`, `following` and `lists/` too when switching Spotify accounts), and `client_id` to use another developer app. Setting
-`RESONA_CLIENT_ID` overrides the saved ID.
+in again (and `liked`, `following` and `lists/` too when switching Spotify accounts), and `client_id` to use another
+developer app. Setting `RESONA_CLIENT_ID` overrides the saved ID.
 
 ## Build from source
 

@@ -997,9 +997,10 @@ pub fn text_field(ui: &mut egui::Ui, id: &str, wired: &str, swiss: &str, query: 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if s.blocky() {
-                // A fixed red ">" prompt; typing starts right after it.
-                ui.label(RichText::new(">").font(if s == Skin::Ascii { mono(15.0, true) } else { num(20.0) }).color(p.accent));
+                // A fixed ">" prompt, red while typing; typing starts right after it.
+                ui.label(RichText::new(">").font(if s == Skin::Ascii { mono(15.0, true) } else { num(20.0) }).color(if focused { p.accent } else { p.dim }));
             }
+            let hint = RichText::new(hint).font(font.clone()).color(p.dim);
             ui.add(egui::TextEdit::singleline(query).id(id).frame(false).hint_text(hint).font(font).margin(Vec2::ZERO).desired_width(f32::INFINITY))
         })
         .inner
@@ -1016,6 +1017,26 @@ pub fn text_field(ui: &mut egui::Ui, id: &str, wired: &str, swiss: &str, query: 
         Skin::Wired => {}
     }
     r.inner
+}
+
+/// A dim label `indent` in, with a rule running on to `width`: the divider between groups of rows (New
+/// releases' days). ASCII's rule is dashes.
+pub fn divider(ui: &mut egui::Ui, text: &str, font: FontId, indent: f32, width: f32) {
+    let (p, s) = (pal(ui.ctx()), skin(ui.ctx()));
+    let left = ui.cursor().left();
+    let r = ui.horizontal(|ui| {
+        ui.add_space(indent);
+        ui.label(RichText::new(text).font(font).color(p.dim))
+    }).inner;
+    let (from, to, y) = (r.rect.right() + 10.0, left + width, r.rect.center().y);
+    if from >= to { return }
+    if s == Skin::Ascii {
+        let font = mono(14.0, false);
+        let n = ((to - from) / cell(ui.painter(), &font).x) as usize;
+        ui.painter().text(pos2(from, y), egui::Align2::LEFT_CENTER, "-".repeat(n), font, p.line);
+    } else {
+        ui.painter().hline(from..=to, y, Stroke::new(1.0_f32, p.line));
+    }
 }
 
 // ---------- covers

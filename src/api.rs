@@ -249,10 +249,21 @@ pub async fn set_liked(auth: &WebAuth, http: &reqwest::Client, id: &str, on: boo
     send(auth, http, method, &format!("me/library?uris=spotify:track:{id}"), None).await.map(drop)
 }
 
+/// Saves someone else's playlist to your library (it shows in the sidebar), through `/me/library` by URI.
+pub async fn save_playlist(auth: &WebAuth, http: &reqwest::Client, id: &str) -> Result<(), String> {
+    send(auth, http, reqwest::Method::PUT, &format!("me/library?uris=spotify:playlist:{id}"), None).await.map(drop)
+}
+
 /// Follows an artist, or unfollows. Through `/me/library` by URI, like liking since the 2026 changes.
 pub async fn set_followed(auth: &WebAuth, http: &reqwest::Client, id: &str, on: bool) -> Result<(), String> {
     let method = if on { reqwest::Method::PUT } else { reqwest::Method::DELETE };
     send(auth, http, method, &format!("me/library?uris=spotify:artist:{id}"), None).await.map(drop)
+}
+
+/// Whether you follow an artist, as Spotify says now (`GET /me/library/contains`, by URI).
+pub async fn is_followed(auth: &WebAuth, http: &reqwest::Client, id: &str) -> Result<bool, String> {
+    let answer: Vec<bool> = get(auth, http, &format!("me/library/contains?uris=spotify:artist:{id}")).await?;
+    answer.first().copied().ok_or_else(|| "Follow check: empty answer".to_string())
 }
 
 /// One Web API call (with an optional JSON body), auth and rate-limit handling; errors for non-2xx answers.
@@ -573,6 +584,8 @@ pub struct Release {
     pub id: String,
     pub name: String,
     pub year: i32,
+    /// The release day, ms since 1970 (midnight UTC).
+    pub day: i64,
     pub kind: &'static str,
     pub cover: Option<String>,
 }
@@ -601,14 +614,35 @@ fn reads_the_radio_playlist() {
     assert_eq!(radio_id(br#"{"total": 0,"mediaItems": []}"#), None);
 }
 
-/// An artist page: portrait, top songs (for the account's country), every album / EP / single newest
+/// An artist page: portrait, popularity (Spotify's 0–100 score), top songs (for the account's country), every album / EP / single newest
 /// first, and the latest songs (the newest releases' first ten). Through the session: the Web API's artist endpoints are hit and miss for developer apps.
-pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<String>, Vec<Track>, Vec<Release>, Vec<Track>), String> {
+/// The releases come in one web-player query when it answers, else one session read per release.
+pub async fn session_artist(session: &Session, http: &reqwest::Client, id: &str) -> Result<(Option<String>, u8, Vec<Track>, Vec<Release>, Vec<Track>), String> {
     let uri = SpotifyUri::from_uri(&format!("spotify:artist:{id}")).map_err(|e| e.to_string())?;
     let artist = metadata::Artist::get(session, &uri).await.map_err(|e| format!("Artist: {e}"))?;
     // Spotify fills `portrait_group` more often than `portraits`; main.rs falls back to the Web API.
     let portrait = cover_url(&artist.portrait_group).or_else(|| cover_url(&artist.portraits));
     let top = session_tracks(session, &artist.top_tracks.for_country(&session.country()).0).await;
+    let (releases, mut fresh) = match web_releases(session, http, id, i64::MIN).await {
+        Some(releases) => {
+            // Latest songs: read only the newest releases, enough of them for ten songs.
+            let mut fresh = vec![];
+            for r in &releases {
+                if fresh.len() >= 10 { break }
+                let Ok(u) = SpotifyUri::from_uri(&format!("spotify:album:{}", r.id)) else { continue };
+                if let Ok(a) = patient(|| metadata::Album::get(session, &u)).await { fresh.extend(a.tracks().cloned()) }
+            }
+            (releases, fresh)
+        }
+        None => session_releases(session, &artist).await,
+    };
+    fresh.truncate(10); // as many as the top songs list holds
+    let latest = session_tracks(session, &fresh).await;
+    Ok((portrait, artist.popularity.clamp(0, 100) as u8, top, releases, latest))
+}
+
+/// Every release read one by one through the session, newest first, and the newest ones' songs.
+async fn session_releases(session: &Session, artist: &metadata::Artist) -> (Vec<Release>, Vec<SpotifyUri>) {
     let ids: Vec<SpotifyUri> = artist.albums_current().chain(artist.singles_current()).chain(artist.compilations_current()).cloned().collect();
     let mut albums = Vec::with_capacity(ids.len());
     for chunk in ids.chunks(25) {
@@ -623,20 +657,367 @@ pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<Strin
     }
     albums.sort_by_key(|a| std::cmp::Reverse(a.date.as_timestamp_ms()));
     albums.dedup_by(|a, b| a.id == b.id);
-    // Latest songs: the newest releases' songs, newest first, as many as the top songs list holds.
-    let fresh: Vec<SpotifyUri> = albums.iter().flat_map(|a| a.tracks().cloned()).take(10).collect();
-    let latest = session_tracks(session, &fresh).await;
+    let fresh = albums.iter().flat_map(|a| a.tracks().cloned()).take(10).collect();
     let releases = albums.into_iter().map(|a| {
         use metadata::album::AlbumType::*;
         Release {
             id: a.id.to_id().unwrap_or_default(),
             year: a.date.year(),
+            day: a.date.as_timestamp_ms(),
             kind: match a.album_type { SINGLE => "SINGLE", EP => "EP", COMPILATION => "COMPILATION", _ => "ALBUM" },
             cover: cover_url(&a.covers),
             name: a.name,
         }
     }).collect();
-    Ok((portrait, top, releases, latest))
+    (releases, fresh)
+}
+
+/// One of the web player's own GraphQL queries, signed in with the session's tokens (so no developer-app call).
+/// ponytail: a private endpoint and fixed persisted-query hashes; callers fall back or leave things out when it
+/// doesn't answer. Upgrade: take the current hashes from the web player.
+async fn web_query(session: &Session, http: &reqwest::Client, op: &str, hash: &str, variables: serde_json::Value) -> Option<Vec<u8>> {
+    let token = session.login5().auth_token().await.ok()?.access_token;
+    let client = session.spclient().client_token().await.ok()?;
+    let body = serde_json::json!({ "operationName": op, "variables": variables, "extensions": { "persistedQuery": { "version": 1, "sha256Hash": hash } } });
+    // A bounded wait: every caller has a fallback, and a stalled answer would hold its page on the spinner.
+    let r = http.post("https://api-partner.spotify.com/pathfinder/v2/query").bearer_auth(token).header("client-token", client)
+        .header("app-platform", "WebPlayer").timeout(std::time::Duration::from_secs(10)).json(&body).send().await.ok()?;
+    if !r.status().is_success() { return None }
+    Some(r.bytes().await.ok()?.to_vec())
+}
+
+#[derive(Deserialize)]
+struct Answer<T> { data: Data<T> }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Data<T> { artist_union: T }
+/// A picture in the sizes the web player's answers list.
+#[derive(Deserialize, Default)]
+struct Pics { sources: Vec<Pic> }
+#[derive(Deserialize)]
+struct Pic { url: String, width: Option<u32> }
+
+/// The smallest picture still 200 px or wider (covers and portraits come in 64, ~300 and 640).
+fn pick(p: &Pics) -> Option<String> {
+    p.sources.iter().filter(|i| i.width.unwrap_or(0) >= 200).min_by_key(|i| i.width).or(p.sources.first()).map(|i| i.url.clone())
+}
+
+/// An artist's albums, EPs, singles and compilations out since `since` (ms since 1970; `i64::MIN` for all),
+/// newest first, from the web player's discography query: pages of 100 for all, of 10 for the latest.
+async fn web_releases(session: &Session, http: &reqwest::Client, id: &str, since: i64) -> Option<Vec<Release>> {
+    let (mut out, mut offset, limit) = (vec![], 0, if since == i64::MIN { 100 } else { 10 });
+    loop {
+        let vars = serde_json::json!({ "uri": format!("spotify:artist:{id}"), "offset": offset, "limit": limit, "order": "DATE_DESC" });
+        let json = web_query(session, http, "queryArtistDiscographyAll", "9380995a9d4663cbcb5113fef3c6aabf70ae6d407ba61793fd01e2a1dd6929b0", vars).await?;
+        let (page, read, total) = discography(&json)?;
+        let older = page.iter().any(|r| r.day < since); // newest first: the rest are older still
+        offset += read; // entries, counting any empty one `discography` dropped, so the next page starts after them
+        out.extend(page.into_iter().filter(|r| r.day >= since));
+        if read == 0 || older || offset >= total { return Some(out) }
+    }
+}
+
+/// Midnight UTC of a day ("2026-10-23…"), ms since 1970; a year alone counts as its 1 January.
+fn day_ms(iso: &str) -> Option<i64> {
+    let part = |r: std::ops::Range<usize>| iso.get(r).and_then(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (part(0..4)?, part(5..7).unwrap_or(1), part(8..10).unwrap_or(1));
+    // Days from 1970-01-01 to y-m-d (proleptic Gregorian), after Howard Hinnant's `days_from_civil`.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400_000)
+}
+
+#[test]
+fn counts_days_from_1970() {
+    assert_eq!(day_ms("1970-01-01T00:00:00Z"), Some(0));
+    assert_eq!(day_ms("2000-03-01T00:00:00Z"), Some(951_868_800_000));
+    assert_eq!(day_ms("2026-10-23T00:00:00Z"), Some(1_792_713_600_000));
+    assert_eq!(day_ms("2019"), day_ms("2019-01-01"));
+    assert_eq!(day_ms("soon"), None);
+}
+
+/// A page of releases, how many entries the page held (an empty one gives no release), and how many there are
+/// in all, out of a `queryArtistDiscographyAll` answer.
+fn discography(json: &[u8]) -> Option<(Vec<Release>, usize, usize)> {
+    #[derive(Deserialize)]
+    struct Union { discography: Disc }
+    #[derive(Deserialize)]
+    struct Disc { all: All }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct All { total_count: usize, items: Vec<Group> }
+    #[derive(Deserialize)]
+    struct Group { releases: Items }
+    #[derive(Deserialize)]
+    struct Items { items: Vec<Item> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Item { id: String, name: String, r#type: String, date: Date, #[serde(default)] cover_art: Pics }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Date { year: i32, iso_string: Option<String> }
+    let all = serde_json::from_slice::<Answer<Union>>(json).ok()?.data.artist_union.discography.all;
+    let read = all.items.len();
+    let releases = all.items.into_iter().filter_map(|g| g.releases.items.into_iter().next()).map(|r| Release {
+        kind: match r.r#type.as_str() { "SINGLE" => "SINGLE", "EP" => "EP", "COMPILATION" => "COMPILATION", _ => "ALBUM" },
+        cover: pick(&r.cover_art),
+        day: r.date.iso_string.as_deref().and_then(day_ms).or_else(|| day_ms(&r.date.year.to_string())).unwrap_or(0),
+        id: r.id, name: r.name, year: r.date.year,
+    }).collect();
+    Some((releases, read, all.total_count))
+}
+
+#[test]
+fn reads_a_discography_page() {
+    let json = br#"{"data":{"artistUnion":{"discography":{"all":{"totalCount":56,"items":[
+        {"releases":{"items":[{"id":"2AyM","name":"Luh Leakyz Vol. 1","type":"ALBUM","date":{"year":2026,"isoString":"2026-10-23T00:00:00Z"},"coverArt":{"sources":[
+            {"url":"big","width":640},{"url":"mid","width":300},{"url":"tiny","width":64}]},"tracks":{"totalCount":14}}]}},
+        {"releases":{"items":[]}},
+        {"releases":{"items":[{"id":"53Kz","name":"COCOON","type":"EP","date":{"year":2026},"coverArt":{"sources":[]}}]}}]}}}}}"#;
+    let (r, read, total) = discography(json).unwrap();
+    assert_eq!((r.len(), read, total), (2, 3, 56), "the empty entry gives no release but counts for the next page");
+    assert_eq!((r[0].kind, r[0].cover.as_deref(), r[0].year, r[0].day), ("ALBUM", Some("mid"), 2026, 1_792_713_600_000));
+    assert_eq!((r[1].name.as_str(), r[1].kind, r[1].cover.as_deref()), ("COCOON", "EP", None));
+}
+
+/// A picture with a name under it that opens a page: a related artist, an artist or album found by search.
+#[derive(Clone)]
+pub struct Card {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+    /// The dim line under the name ("2026 · Yeat"); may be empty.
+    pub note: String,
+}
+
+/// Besides songs, what a search finds.
+#[derive(Default, Clone)]
+pub struct Found {
+    pub artists: Vec<Card>,
+    pub albums: Vec<Card>,
+    pub playlists: Vec<Playlist>,
+}
+
+/// Search through the web player's own query: 50 songs and 50 each of artists, albums and playlists in one
+/// request (the Web API gives developer apps pages of 10, songs only).
+pub async fn web_search(session: &Session, http: &reqwest::Client, query: &str) -> Option<(Vec<Track>, Found)> {
+    let vars = serde_json::json!({ "searchTerm": query, "offset": 0, "limit": 50, "numberOfTopResults": 5, "includeAudiobooks": false,
+        "includeArtistHasConcertsField": false, "includePreReleases": false, "includeLocalConcertsField": false, "includeAuthors": false });
+    search_answer(&web_query(session, http, "searchDesktop", "21969b655b795601fb2d2204a4243188e75fdc6d3520e7b9cd3f4db2aff9591e", vars).await?)
+}
+
+/// Songs and the rest out of a `searchDesktop` answer. Songs Spotify marks unplayable are left out.
+fn search_answer(json: &[u8]) -> Option<(Vec<Track>, Found)> {
+    #[derive(Deserialize)]
+    struct Answer { data: Data }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Data { search_v2: Search }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Search { tracks_v2: Items<Item>, artists: Items<Wrap>, albums: Items<Wrap>, playlists: Items<Wrap> }
+    #[derive(Deserialize)]
+    struct Items<T> { #[serde(default = "Vec::new")] items: Vec<T> }
+    #[derive(Deserialize)]
+    struct Item { item: Wrap }
+    // Every result comes as `{"data": {...}}`; one that isn't a song, artist, … (another `__typename`) won't parse and is skipped.
+    #[derive(Deserialize)]
+    struct Wrap { data: serde_json::Value }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Song { id: String, name: String, album_of_track: Album, artists: Items<Who>, duration: Duration, playability: Option<Playable> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Duration { total_milliseconds: u32 }
+    #[derive(Deserialize)]
+    struct Playable { playable: bool }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Album { uri: String, name: String, #[serde(default)] cover_art: Pics, #[serde(default)] artists: Option<Items<Who>>, date: Option<Year> }
+    #[derive(Deserialize)]
+    struct Year { year: i32 }
+    #[derive(Deserialize)]
+    struct Who { uri: String, profile: Name }
+    #[derive(Deserialize)]
+    struct Name { name: String }
+    #[derive(Deserialize)]
+    struct Artist { uri: String, profile: Name, visuals: Option<Visuals> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Visuals { avatar_image: Option<Pics> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Pl { uri: String, name: String, images: Option<Items<Pics>>, owner_v2: Option<Wrap> }
+    #[derive(Deserialize)]
+    struct Owner2 { name: Option<String>, username: Option<String> }
+    fn parse<T: DeserializeOwned>(items: Vec<Wrap>) -> impl Iterator<Item = T> {
+        items.into_iter().filter_map(|i| serde_json::from_value(i.data).ok())
+    }
+    let id = |uri: &str| uri.rsplit(':').next().unwrap_or_default().to_string();
+    let by = |w: Items<Who>| w.items.into_iter().map(|a| Named { id: Some(id(&a.uri)), name: a.profile.name }).collect::<Vec<_>>();
+    let s = serde_json::from_slice::<Answer>(json).ok()?.data.search_v2;
+    let tracks = parse(s.tracks_v2.items.into_iter().map(|w| w.item).collect()).filter(|t: &Song| t.playability.as_ref().is_none_or(|p| p.playable)).map(|t| {
+        // Biggest picture first, as the Web API lists them (the views take the second for a mid size).
+        let mut pics = t.album_of_track.cover_art.sources;
+        pics.sort_by_key(|p| std::cmp::Reverse(p.width));
+        Track {
+            id: Some(t.id), name: t.name, artists: by(t.artists), duration_ms: t.duration.total_milliseconds, kind: "track".into(),
+            album: crate::api::Album { id: Some(id(&t.album_of_track.uri)), name: t.album_of_track.name, images: pics.into_iter().map(|p| Image { url: p.url }).collect(), ..Default::default() },
+            ..Default::default()
+        }
+    }).collect();
+    let artists = parse(s.artists.items).map(|a: Artist| Card {
+        image: a.visuals.and_then(|v| v.avatar_image).as_ref().and_then(pick), id: id(&a.uri), name: a.profile.name, note: String::new(),
+    }).collect();
+    let albums = parse(s.albums.items).map(|a: Album| {
+        let names = a.artists.map(by).unwrap_or_default().into_iter().map(|n| n.name).collect::<Vec<_>>().join(", ");
+        let note = match a.date { Some(d) if names.is_empty() => d.year.to_string(), Some(d) => format!("{} · {names}", d.year), None => names };
+        Card { image: pick(&a.cover_art), id: id(&a.uri), name: a.name, note }
+    }).collect();
+    let playlists = parse(s.playlists.items).map(|p: Pl| {
+        let owner = p.owner_v2.and_then(|o| serde_json::from_value::<Owner2>(o.data).ok());
+        Playlist {
+            id: id(&p.uri), name: p.name, collaborative: false,
+            images: p.images.and_then(|i| i.items.into_iter().next()).and_then(|i| pick(&i)).map(|url| vec![Image { url }]),
+            owner: owner.map(|o| Owner { id: o.username, display_name: o.name }),
+        }
+    }).collect();
+    Some((tracks, Found { artists, albums, playlists }))
+}
+
+#[test]
+fn reads_a_search() {
+    let json = br#"{"data":{"searchV2":{
+        "tracksV2":{"items":[
+            {"item":{"data":{"__typename":"Track","id":"4Se3","name":"Money so big","albumOfTrack":{"uri":"spotify:album:3ZKE","name":"Up 2 Me",
+                "coverArt":{"sources":[{"url":"s300","width":300},{"url":"s64","width":64},{"url":"s640","width":640}]}},
+                "artists":{"items":[{"uri":"spotify:artist:3qiH","profile":{"name":"Yeat"}}]},"duration":{"totalMilliseconds":160052},"playability":{"playable":true}}}},
+            {"item":{"data":{"__typename":"Track","id":"gone","name":"Gone","albumOfTrack":{"uri":"spotify:album:x","name":"x"},
+                "artists":{"items":[]},"duration":{"totalMilliseconds":1},"playability":{"playable":false}}}},
+            {"item":{"data":{"__typename":"NotFound"}}}]},
+        "artists":{"items":[{"data":{"__typename":"Artist","uri":"spotify:artist:3qiH","profile":{"name":"Yeat"},"visuals":{"avatarImage":null}}}]},
+        "albums":{"items":[{"data":{"__typename":"Album","uri":"spotify:album:53Kz","name":"COCOON","artists":{"items":[{"uri":"spotify:artist:3qiH","profile":{"name":"Yeat"}}]},
+            "coverArt":{"sources":[{"url":"c300","width":300}]},"date":{"year":2026}}}]},
+        "playlists":{"items":[{"data":{"__typename":"Playlist","uri":"spotify:playlist:33ei","name":"Prime yeat",
+            "images":{"items":[{"sources":[{"url":"p","width":null}]}]},"ownerV2":{"data":{"__typename":"User","name":"Mikysek","username":"a6y5"}}}}]}}}}"#;
+    let (tracks, found) = search_answer(json).unwrap();
+    assert_eq!(tracks.len(), 1, "the unplayable song and the odd item drop out");
+    let t = &tracks[0];
+    assert_eq!((t.id.as_deref(), t.artist_line(), t.duration_ms, t.album.id.as_deref()), (Some("4Se3"), "Yeat".to_string(), 160052, Some("3ZKE")));
+    assert_eq!(t.album.images.iter().map(|i| i.url.as_str()).collect::<Vec<_>>(), ["s640", "s300", "s64"]);
+    assert_eq!((found.artists[0].id.as_str(), found.artists[0].image.as_deref()), ("3qiH", None));
+    assert_eq!((found.albums[0].name.as_str(), found.albums[0].note.as_str()), ("COCOON", "2026 · Yeat"));
+    let p = &found.playlists[0];
+    assert_eq!((p.id.as_str(), p.owner.as_ref().and_then(|o| o.display_name.as_deref()), p.web_readable("a6y5")), ("33ei", Some("Mikysek"), true));
+}
+
+/// An upcoming show, as the overview lists it.
+pub struct Show {
+    /// "30 Oct", the day where it's played.
+    pub day: String,
+    pub year: i32,
+    pub venue: String,
+    pub city: String,
+    /// Who plays (a festival's name for a festival).
+    pub title: String,
+    /// Spotify counts it as near you.
+    pub near: bool,
+}
+
+/// What an artist page gets from the web player's overview query.
+pub struct Overview {
+    pub listeners: u64,
+    pub followers: u64,
+    /// "Fans also like".
+    pub related: Vec<Card>,
+    /// The next shows (the first 10, by date), near-you ones first, and how many there are in all.
+    pub shows: Vec<Show>,
+    pub shows_total: usize,
+}
+
+/// An artist's monthly listeners, followers, related artists and upcoming shows, from the web player's overview
+/// query (the session has none of them: its related list is empty, and the Web API doesn't count listeners).
+pub async fn artist_overview(session: &Session, http: &reqwest::Client, id: &str) -> Option<Overview> {
+    let vars = serde_json::json!({ "uri": format!("spotify:artist:{id}"), "locale": "", "includePrerelease": false });
+    overview(&web_query(session, http, "queryArtistOverview", "35648a112beb1794e39ab931365f6ae4a8d45e65396d641eeda94e4003d41497", vars).await?)
+}
+
+/// An `Overview` out of a `queryArtistOverview` answer.
+fn overview(json: &[u8]) -> Option<Overview> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Union { stats: Stats, related_content: Option<Content>, goods: Option<Goods> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Stats { monthly_listeners: u64, followers: u64 }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Content { related_artists: Items<Item> }
+    #[derive(Deserialize)]
+    struct Items<T> { items: Vec<T> }
+    #[derive(Deserialize)]
+    struct Item { id: String, profile: Profile, visuals: Option<Visuals> }
+    #[derive(Deserialize)]
+    struct Profile { name: String }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Visuals { avatar_image: Option<Pics> }
+    #[derive(Deserialize)]
+    struct Goods { events: Option<Events> }
+    #[derive(Deserialize)]
+    struct Events { concerts: Option<Concerts> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Concerts { total_count: usize, items: Vec<Concert> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Concert { title: String, date: Date, venue: Venue, #[serde(default)] near_user: bool }
+    #[derive(Deserialize)]
+    struct Date { year: i32, month: usize, day: u32 }
+    #[derive(Deserialize)]
+    struct Venue { name: String, location: Option<Profile> }
+    let u = serde_json::from_slice::<Answer<Union>>(json).ok()?.data.artist_union;
+    let related = u.related_content.map_or(vec![], |c| c.related_artists.items).into_iter().map(|a| Card {
+        image: a.visuals.and_then(|v| v.avatar_image).as_ref().and_then(pick),
+        id: a.id, name: a.profile.name, note: String::new(),
+    }).collect();
+    let concerts = u.goods.and_then(|g| g.events).and_then(|e| e.concerts);
+    let shows_total = concerts.as_ref().map_or(0, |c| c.total_count);
+    let mut shows: Vec<Show> = concerts.map_or(vec![], |c| c.items).into_iter().map(|c| Show {
+        day: format!("{} {}", c.date.day, MONTHS.get(c.date.month.wrapping_sub(1)).unwrap_or(&"")),
+        year: c.date.year,
+        venue: c.venue.name,
+        city: c.venue.location.map_or(String::new(), |l| l.name),
+        title: c.title,
+        near: c.near_user,
+    }).collect();
+    shows.sort_by_key(|s| !s.near); // stable: by date within each
+    let shows_total = shows_total.max(shows.len());
+    Some(Overview { listeners: u.stats.monthly_listeners, followers: u.stats.followers, related, shows, shows_total })
+}
+
+#[test]
+fn reads_an_overview() {
+    let json = br#"{"data":{"artistUnion":{"__typename":"Artist","stats":{"followers":6696904,"monthlyListeners":18208296,"worldRank":0},
+        "relatedContent":{"relatedArtists":{"totalCount":2,"items":[
+            {"id":"3gBZ","profile":{"name":"Ken Carson"},"visuals":{"avatarImage":{"sources":[{"url":"a640","width":640},{"url":"a320","width":320}]}}},
+            {"id":"699O","profile":{"name":"Playboi Carti"},"visuals":{"avatarImage":null}}]}},
+        "goods":{"events":{"concerts":{"totalCount":29,"items":[
+            {"title":"Yeat, Destroy Lonely","date":{"year":2026,"month":10,"day":30},"venue":{"name":"Thomas & Mack Center","location":{"name":"Las Vegas"}},"nearUser":false},
+            {"title":"Yeat","date":{"year":2026,"month":11,"day":14},"venue":{"name":"Palladium","location":{"name":"Koeln"}},"nearUser":true}]}}}}}}"#;
+    let o = overview(json).unwrap();
+    assert_eq!((o.listeners, o.followers, o.related.len()), (18208296, 6696904, 2));
+    assert_eq!((o.related[0].name.as_str(), o.related[0].image.as_deref()), ("Ken Carson", Some("a320")));
+    assert_eq!(o.related[1].image, None);
+    // The show near you first, then by date; the total counts the ones not listed.
+    assert_eq!(o.shows.iter().map(|s| (s.day.as_str(), s.city.as_str())).collect::<Vec<_>>(), [("14 Nov", "Koeln"), ("30 Oct", "Las Vegas")]);
+    assert_eq!(o.shows_total, 29);
+    let none = overview(br#"{"data":{"artistUnion":{"stats":{"followers":1,"monthlyListeners":2}}}}"#).unwrap();
+    assert!(none.shows.is_empty() && none.related.is_empty());
+    assert!(overview(br#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#).is_none());
 }
 
 #[test]
@@ -649,7 +1030,13 @@ fn artist_page_lists_releases_newest_first() {
         let creds = cache.credentials().expect("signed in");
         let session = Session::new(SessionConfig::default(), Some(cache));
         session.connect(creds, true).await.unwrap();
-        let (_, top, releases, latest) = session_artist(&session, "3qiHUAX7zY4Qnjx8TNUzVx").await.unwrap(); // Yeat
+        let http = reqwest::Client::new();
+        let (_, popularity, top, releases, latest) = session_artist(&session, &http, "3qiHUAX7zY4Qnjx8TNUzVx").await.unwrap(); // Yeat
+        let o = artist_overview(&session, &http, "3qiHUAX7zY4Qnjx8TNUzVx").await.expect("overview");
+        eprintln!("popularity {popularity}, {} listeners, {} followers, {} releases, {} related, {} shows", o.listeners, o.followers, releases.len(), o.related.len(), o.shows_total);
+        assert!(popularity > 0 && o.listeners > 0 && o.followers > 0 && !o.related.is_empty());
+        let artist = metadata::Artist::get(&session, &SpotifyUri::from_uri("spotify:artist:3qiHUAX7zY4Qnjx8TNUzVx").unwrap()).await.unwrap();
+        assert_eq!(releases.len(), session_releases(&session, &artist).await.0.len(), "the web query and the session see the same releases");
         for r in &releases { eprintln!("{} {} {}", r.year, r.kind, r.name) }
         for t in &latest { eprintln!("latest: {} ({})", t.name, t.album.name) }
         assert!(!top.is_empty() && !latest.is_empty());
@@ -657,7 +1044,29 @@ fn artist_page_lists_releases_newest_first() {
     });
 }
 
-/// The artists you follow (ids), through the Web API: the session has no such list.
+/// The artists you follow (ids), through the session (your profile's following list, which also holds
+/// the people you follow: left out). Works through a Web API ban. Empty counts as no answer: a profile
+/// that hides who it follows may answer that way, and the Web API then says for sure.
+pub async fn session_following(session: &Session) -> Option<Vec<String>> {
+    following_artists(&session.spclient().get_user_following(&session.username()).await.ok()?).filter(|a| !a.is_empty())
+}
+
+fn following_artists(json: &[u8]) -> Option<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Following { profiles: Vec<Profile> }
+    #[derive(Deserialize)]
+    struct Profile { uri: String }
+    let f: Following = serde_json::from_slice(json).ok()?;
+    Some(f.profiles.into_iter().filter_map(|p| p.uri.strip_prefix("spotify:artist:").map(String::from)).collect())
+}
+
+#[test]
+fn following_keeps_artists_only() {
+    let json = br#"{"profiles":[{"name":"1019","uri":"spotify:artist:3r82"},{"name":"a friend","uri":"spotify:user:corvin"},{"uri":"spotify:artist:78TT"}]}"#;
+    assert_eq!(following_artists(json), Some(vec!["3r82".to_string(), "78TT".to_string()]));
+}
+
+/// The artists you follow (ids), through the Web API: the fallback when the session's list doesn't answer.
 pub async fn followed_artists(auth: &WebAuth, http: &reqwest::Client) -> Result<Vec<String>, String> {
     #[derive(Deserialize)]
     struct Following { artists: Page }
@@ -678,16 +1087,17 @@ pub async fn followed_artists(auth: &WebAuth, http: &reqwest::Client) -> Result<
     }
 }
 
-/// New releases by these artists (albums, EPs and singles out since `since`, ms since 1970), through the
-/// session. An artist's releases come newest first, so each list is read only up to the first older one:
-/// a few requests per artist. Songs go to `each` one release at a time, `added` set to the release day.
-pub async fn session_new_releases(session: &Session, artists: &[String], since: i64, mut each: impl FnMut(Vec<Track>) -> bool) {
+/// New releases by these artists (albums, EPs and singles out since `since`, ms since 1970): which ones from
+/// the web player's discography query (one request per artist), else through the session, where each list is
+/// read newest first only up to the first older one (a few requests per artist). Their songs come through the
+/// session and go to `each` one release at a time, `added` set to the release day.
+pub async fn session_new_releases(session: &Session, http: &reqwest::Client, artists: &[String], since: i64, mut each: impl FnMut(Vec<Track>) -> bool) {
     let mut seen = std::collections::HashSet::new(); // a release shared by two followed artists comes once
     for chunk in artists.chunks(8) {
         let mut set = tokio::task::JoinSet::new();
         for id in chunk {
-            let (session, id) = (session.clone(), id.clone());
-            set.spawn(async move { fresh_releases(&session, &id, since).await });
+            let (session, http, id) = (session.clone(), http.clone(), id.clone());
+            set.spawn(async move { fresh_releases(&session, &http, &id, since).await });
         }
         while let Some(done) = set.join_next().await {
             let Ok(albums) = done else { continue }; // one artist failing keeps the others
@@ -703,7 +1113,15 @@ pub async fn session_new_releases(session: &Session, artists: &[String], since: 
 }
 
 /// One artist's albums and singles out since `since`.
-async fn fresh_releases(session: &Session, id: &str, since: i64) -> Vec<metadata::Album> {
+async fn fresh_releases(session: &Session, http: &reqwest::Client, id: &str, since: i64) -> Vec<metadata::Album> {
+    if let Some(releases) = web_releases(session, http, id, since).await {
+        let mut out = vec![];
+        for r in releases.iter().filter(|r| r.kind != "COMPILATION") {
+            let Ok(u) = SpotifyUri::from_uri(&format!("spotify:album:{}", r.id)) else { continue };
+            if let Ok(a) = patient(|| metadata::Album::get(session, &u)).await { out.push(a) } // unreadable just now: skip it
+        }
+        return out;
+    }
     let Ok(uri) = SpotifyUri::from_uri(&format!("spotify:artist:{id}")) else { return vec![] };
     let Ok(artist) = patient(|| metadata::Artist::get(session, &uri)).await else { return vec![] };
     let mut out = vec![];
@@ -734,10 +1152,12 @@ pub async fn session_album(session: &Session, id: &str) -> Result<Vec<Track>, St
     Ok(tracks)
 }
 
+/// Month names as shown in dates ("9 Aug 2024", "Fri 23 Oct").
+pub const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 /// "9 Aug 2024". librespot turns a year-only date into 1 January, so that day shows as the year alone.
 // ponytail: a real 1 January release shows as its year too; the date's precision is lost inside librespot.
 fn release_day(year: i32, month: u8, day: u8) -> String {
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     if (month, day) == (1, 1) { return year.to_string() }
     format!("{day} {} {year}", MONTHS[(month.clamp(1, 12) - 1) as usize])
 }
@@ -796,5 +1216,31 @@ fn list_version_is_steady_for_an_unchanged_list() {
             assert_eq!(v, list_version(&session, &src).await);
         }
         assert_eq!(list_version(&session, &Source::Search("x".into())).await, None);
+    });
+}
+
+
+
+
+
+#[test]
+#[ignore = "live: needs ~/.resona/credentials.json and the network (cargo test -- --ignored)"]
+fn web_search_finds_more_than_a_web_api_page() {
+    use librespot::core::{cache::Cache, config::SessionConfig};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cache = Cache::new(Some(std::env::home_dir().unwrap().join(".resona")), None, None, None).unwrap();
+        let creds = cache.credentials().expect("signed in");
+        let session = Session::new(SessionConfig::default(), Some(cache));
+        session.connect(creds, true).await.unwrap();
+        let (tracks, found) = web_search(&session, &reqwest::Client::new(), "yeat").await.expect("search answers");
+        eprintln!("{} songs, {} artists, {} albums, {} playlists", tracks.len(), found.artists.len(), found.albums.len(), found.playlists.len());
+        assert!(tracks.len() > 10 && !found.artists.is_empty() && !found.albums.is_empty());
+        // A found playlist someone else made opens through the session.
+        let p = found.playlists.iter().find(|p| !p.web_readable(&session.username())).expect("someone else's playlist");
+        let mut got = 0;
+        session_playlist(&session, &p.id, crate::state::Sort::List, |t, _| { got += t.len(); true }).await.unwrap();
+        eprintln!("\"{}\": {got} songs", p.name);
+        assert!(got > 0);
     });
 }

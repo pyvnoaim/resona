@@ -35,6 +35,42 @@ pub fn total_length(ms: u64) -> String {
     if min >= 60 { format!("{} h {} min", min / 60, min % 60) } else { format!("{min} min") }
 }
 
+/// "Fri 23 Oct": a day (ms since 1970, midnight UTC), for New releases' dividers.
+pub fn day_label(ms: i64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]; // 1 January 1970 was a Thursday
+    let days = ms.div_euclid(86_400_000);
+    // Day of the month and month from days since 1970, after Howard Hinnant's `civil_from_days`.
+    let z = days + 719_468;
+    let doe = z - z.div_euclid(146_097) * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    format!("{} {d} {}", DAYS[days.rem_euclid(7) as usize], api::MONTHS[(m - 1) as usize])
+}
+
+#[test]
+fn names_release_days() {
+    assert_eq!(day_label(0), "Thu 1 Jan");
+    assert_eq!(day_label(1_792_713_600_000), "Fri 23 Oct"); // 2026-10-23
+    assert_eq!(day_label(951_782_400_000), "Tue 29 Feb"); // 2000-02-29
+}
+
+/// "18,208,296": a count with its thousands marked.
+pub fn grouped(n: u64) -> String {
+    let d = n.to_string();
+    d.char_indices().fold(String::new(), |mut out, (i, c)| {
+        if i > 0 && (d.len() - i).is_multiple_of(3) { out.push(',') }
+        out.push(c);
+        out
+    })
+}
+
+#[test]
+fn groups_thousands() {
+    assert_eq!((grouped(0), grouped(999), grouped(1000), grouped(18208296)), ("0".into(), "999".into(), "1,000".into(), "18,208,296".into()));
+}
+
 /// Small text in this skin's voice (counts, timecodes).
 pub fn small(s: Skin) -> FontId {
     match s {
@@ -132,6 +168,47 @@ fn link(ui: &egui::Ui, at: Rect, id: egui::Id, color: egui::Color32) -> egui::Re
 
 /// A song's artist line (`artist_line`, drawn at `at` in `size`) as one link per name: the one under the
 /// pointer is underlined and, clicked, gives its page.
+/// A row of covers (an artist's releases, related artists, search results), each with its name and a dim line
+/// under it; scrolls sideways, or with `wrap` fills the width and runs on in rows. Returns the one clicked.
+fn strip(ui: &mut egui::Ui, salt: &str, items: &[(&str, Option<&str>, String)], wrap: bool) -> Option<usize> {
+    let (p, sk) = (skin::pal(ui.ctx()), skin::skin(ui.ctx()));
+    let mut hit = None;
+    let mut covers = |ui: &mut egui::Ui| {
+            ui.spacing_mut().item_spacing = vec2(16.0, 12.0);
+            for (i, (name, cover, meta)) in items.iter().enumerate() {
+                let size = 132.0;
+                let (rect, resp) = ui.allocate_exact_size(vec2(size, size + 46.0), Sense::click());
+                let art = Rect::from_min_size(rect.min, Vec2::splat(size));
+                let initials = initials(name);
+                skin::cover(&mut ui.new_child(egui::UiBuilder::new().max_rect(art)), *cover, size, Stamp::Text(&initials), false);
+                if resp.hovered() { ui.painter().rect_stroke(art, 0.0, Stroke::new(2.0_f32, p.accent), StrokeKind::Outside); }
+                let line = |text: String, font: FontId, color| {
+                    let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(size);
+                    ui.painter().layout_job(job)
+                };
+                let title = line(name.to_string(), FontId::proportional(13.0), if resp.hovered() { p.accent } else { p.text });
+                let under = line(meta.clone(), skin::num(if sk == Skin::Wired { 16.0 } else { 11.0 }), p.dim);
+                let y = art.bottom() + 6.0;
+                let below = y + title.size().y + 2.0;
+                ui.painter().galley(pos2(art.left(), y), title, p.text);
+                ui.painter().galley(pos2(art.left(), below), under, p.dim);
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(*name).clicked() { hit = Some(i) }
+            }
+    };
+    if wrap {
+        ui.horizontal_wrapped(covers);
+    } else {
+        let scroll = egui::ScrollArea::horizontal().id_salt(salt).show(ui, |ui| ui.horizontal(&mut covers));
+        skin::char_scroll(ui, &scroll);
+    }
+    hit
+}
+
+/// Which results a search page shows.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Show { #[default] All, Songs, Artists, Albums, Playlists }
+
 fn artist_link(ui: &egui::Ui, t: &api::Track, at: Rect, size: f32, id: egui::Id, color: egui::Color32) -> (egui::Response, Option<Source>) {
     let x = ui.input(|i| i.pointer.hover_pos()).map_or(at.left(), |p| p.x);
     let width = |text: &str| ui.painter().layout_no_wrap(text.into(), FontId::proportional(size), color).size().x;
@@ -865,7 +942,7 @@ impl App {
             Some(Source::Artist { name, .. }) => (name.clone(), s.artist.as_ref().and_then(|a| a.portrait.clone())),
             Some(Source::Album { name, .. }) => (name.clone(), s.tracks.first().and_then(|t| t.album.images.get(1).or(t.album.images.first())).map(|i| i.url.clone())),
             Some(Source::Radio { name, .. }) => (format!("{name} Radio"), s.tracks.first().and_then(|t| t.album.images.get(1).or(t.album.images.first())).map(|i| i.url.clone())),
-            Some(Source::Playlist(id)) => s.playlists.iter().find(|pl| &pl.id == id)
+            Some(Source::Playlist(id)) => s.playlist(id)
                 .map(|pl| (pl.name.clone(), pl.images.as_ref().and_then(|v| v.get(1).or(v.first())).map(|i| i.url.clone())))
                 .unwrap_or_default(),
         };
@@ -894,7 +971,20 @@ impl App {
         let kind = kind.as_str();
         let (mut clicked, mut like) = (self.enter.take(), None); // Enter plays like a click
         let (mut goto, mut play_all, mut point): (Option<Source>, Option<bool>, Option<usize>) = (None, None, None);
-        let (mut resort, mut follow) = (false, None::<String>);
+        let (mut resort, mut follow, mut visit, mut save) = (false, None::<String>, None::<api::Playlist>, false);
+        // The search filter, kept from one search to the next.
+        let filter_id = egui::Id::new("search-filter");
+        let mut show: Show = ui.ctx().data(|d| d.get_temp(filter_id)).unwrap_or_default();
+        // The Web API's search has songs only; a kept filter this search has nothing for shows everything.
+        show = match (&s.found, show) {
+            (None, _) => Show::All,
+            (Some(f), Show::Artists) if f.artists.is_empty() => Show::All,
+            (Some(f), Show::Albums) if f.albums.is_empty() => Show::All,
+            (Some(f), Show::Playlists) if f.playlists.is_empty() => Show::All,
+            _ => show,
+        };
+        // ponytail: with the songs hidden, the keyboard cursor still walks them unseen; Enter is held back.
+        if !matches!(show, Show::All | Show::Songs) { clicked = None }
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
         let jump_row = self.jump.as_ref().and_then(|id| s.tracks.iter().position(|t| t.id.as_ref() == Some(id)));
         if jump_row.is_some() || !s.loading && s.view.is_some() && self.jump.is_some() && !s.tracks.is_empty() { self.jump = None }
@@ -990,7 +1080,47 @@ impl App {
                                 ui.label(RichText::new(skin::plain(sk, &count)).font(small(sk)).color(p.dim));
                             }
                         }
-                        if n > 0 && view != Source::Queue {
+                        // Artist pages: monthly listeners and followers (when the web player's query answered), then popularity.
+                        if let (Source::Artist { .. }, Some(a)) = (&view, &s.artist) {
+                            let stats = a.overview.as_ref().map(|o| format!("{} monthly listeners · {} followers", grouped(o.listeners), grouped(o.followers)));
+                            if sk == Skin::Swiss {
+                                let line = stats.map_or(String::new(), |t| format!("{t} · ")) + &format!("popularity {}", a.popularity);
+                                ui.label(RichText::new(line).font(small(sk)).color(p.dim));
+                            } else {
+                                if let Some(t) = stats { ui.label(RichText::new(skin::plain(sk, &t.to_uppercase())).font(small(sk)).color(p.dim)); }
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("POPULARITY").font(small(sk)).color(p.dim));
+                                    skin::progress(ui, 120.0, a.popularity as usize, Some(100));
+                                    ui.label(RichText::new(a.popularity.to_string()).font(small(sk)).color(p.dim));
+                                });
+                            }
+                            // The next show (near you first, in the accent); every listed one on hover.
+                            if let Some((o, next)) = a.overview.as_ref().and_then(|o| Some((o, o.shows.first()?))) {
+                                let more = o.shows_total - 1;
+                                let line = format!("{} · {} · {}, {}{}", if next.near { "Live near you" } else { "Live" }, next.day, next.venue, next.city,
+                                    if more > 0 { format!(" +{more} more") } else { String::new() });
+                                let line = if sk == Skin::Swiss { line } else { line.to_uppercase() };
+                                let mut all: Vec<String> = o.shows.iter().map(|s| format!("{} {}, {}, {}: {}", s.day, s.year, s.venue, s.city, s.title)).collect();
+                                if o.shows_total > o.shows.len() { all.push(format!("and {} more", o.shows_total - o.shows.len())) }
+                                ui.label(RichText::new(skin::plain(sk, &line)).font(small(sk)).color(if next.near { p.accent } else { p.dim })).on_hover_text(all.join("\n"));
+                            }
+                        }
+                        // Search: what to show.
+                        if s.found.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                let caps = !matches!(sk, Skin::Swiss);
+                                for (f, name) in [(Show::All, "All"), (Show::Songs, "Songs"), (Show::Artists, "Artists"), (Show::Albums, "Albums"), (Show::Playlists, "Playlists")] {
+                                    let text = if caps { name.to_uppercase() } else { name.to_string() };
+                                    if skin::action_button(ui, &text, show == f).clicked() {
+                                        show = f;
+                                        ui.ctx().data_mut(|d| d.insert_temp(filter_id, f));
+                                    }
+                                }
+                            });
+                        }
+                        // Play / Shuffle: not for the queue or a search (pick a song instead).
+                        if n > 0 && !matches!(view, Source::Queue | Source::Search(_)) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 10.0;
                                 let caps = !matches!(sk, Skin::Swiss);
@@ -1000,6 +1130,9 @@ impl App {
                                     let text = match (a.followed, caps) { (true, true) => "FOLLOWING", (true, false) => "Following", (false, true) => "FOLLOW", (false, false) => "Follow" };
                                     if skin::action_button(ui, text, false).clicked() { follow = Some(id.clone()) }
                                 }
+                                // A playlist opened from search that isn't in your library yet.
+                                if let Source::Playlist(id) = &view && s.visiting.as_ref().is_some_and(|p| &p.id == id) && !s.playlists.iter().any(|p| &p.id == id)
+                                    && skin::action_button(ui, if caps { "SAVE" } else { "Save" }, false).clicked() { save = true }
                                 // Only where it does something: lists with dates (not search, albums, artists).
                                 if s.tracks.iter().any(|t| t.added > 0) {
                                     let order = s.sort.label().unwrap_or("list order");
@@ -1012,41 +1145,53 @@ impl App {
                 });
                 ui.add_space(14.0);
 
-                let artist_page = s.artist.is_some();
-                // Everything under the header; on artist pages it all scrolls together.
+                // ponytail: New releases lays out every row (for its day dividers), fine for a few hundred songs; a
+                // much longer list would want the dividers inside `show_rows`.
+                let artist_page = s.artist.is_some() || s.found.is_some() || view == Source::NewReleases;
+                // Everything under the header; on artist pages, searches and New releases it all scrolls together.
                 let mut rest = |ui: &mut egui::Ui| {
+                    // Search: artists, albums and playlists as rows of covers (one type alone fills the page), then the songs.
+                    if let Some(f) = s.found.as_ref() {
+                        let (wired, one) = (sk == Skin::Wired, show != Show::All);
+                        let heading = |ui: &mut egui::Ui, en: &str, jp: &str| {
+                            ui.label(RichText::new(if wired { format!("{en} // {jp}") } else { en.to_string() }).font(small(sk)).color(p.dim));
+                        };
+                        if matches!(show, Show::All | Show::Artists) && !f.artists.is_empty() {
+                            heading(ui, "ARTISTS", "アーティスト");
+                            let items: Vec<_> = f.artists.iter().map(|c| (c.name.as_str(), c.image.as_deref(), String::new())).collect();
+                            if let Some(i) = strip(ui, "found-artists", &items, one) { goto = Some(Source::Artist { id: f.artists[i].id.clone(), name: f.artists[i].name.clone() }) }
+                            ui.add_space(12.0);
+                        }
+                        if matches!(show, Show::All | Show::Albums) && !f.albums.is_empty() {
+                            heading(ui, "ALBUMS", "アルバム");
+                            let items: Vec<_> = f.albums.iter().map(|c| (c.name.as_str(), c.image.as_deref(), c.note.clone())).collect();
+                            if let Some(i) = strip(ui, "found-albums", &items, one) { goto = Some(Source::Album { id: f.albums[i].id.clone(), name: f.albums[i].name.clone() }) }
+                            ui.add_space(12.0);
+                        }
+                        if matches!(show, Show::All | Show::Playlists) && !f.playlists.is_empty() {
+                            heading(ui, "PLAYLISTS", "プレイリスト");
+                            let items: Vec<_> = f.playlists.iter().map(|pl| {
+                                let by = pl.owner.as_ref().and_then(|o| o.display_name.clone()).map_or(String::new(), |n| format!("by {n}"));
+                                (pl.name.as_str(), pl.images.as_ref().and_then(|v| v.first()).map(|i| i.url.as_str()), by)
+                            }).collect();
+                            if let Some(i) = strip(ui, "found-playlists", &items, one) {
+                                visit = Some(f.playlists[i].clone());
+                                goto = Some(Source::Playlist(f.playlists[i].id.clone()));
+                            }
+                            ui.add_space(12.0);
+                        }
+                        if !matches!(show, Show::All | Show::Songs) { return }
+                        if show == Show::All && !s.tracks.is_empty() { heading(ui, "SONGS", "曲") }
+                    }
                     // Artist pages: their albums / EPs / singles as a strip of covers, then the top songs.
                     if let Some(a) = s.artist.as_ref().filter(|a| !a.releases.is_empty()) {
                         let wired = sk == Skin::Wired;
                         ui.label(RichText::new(if wired { "ALBUMS & EPS // ディスコグラフィ" } else { "ALBUMS & EPS" }).font(small(sk)).color(p.dim));
-                        let scroll = egui::ScrollArea::horizontal().id_salt("releases").show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 16.0;
-                                for r in &a.releases {
-                                    let size = 132.0;
-                                    let (rect, resp) = ui.allocate_exact_size(vec2(size, size + 46.0), Sense::click());
-                                    let art = Rect::from_min_size(rect.min, Vec2::splat(size));
-                                    let initials = initials(&r.name);
-                                    skin::cover(&mut ui.new_child(egui::UiBuilder::new().max_rect(art)), r.cover.as_deref(), size, Stamp::Text(&initials), false);
-                                    if resp.hovered() { ui.painter().rect_stroke(art, 0.0, Stroke::new(2.0_f32, p.accent), StrokeKind::Outside); }
-                                    let line = |text: String, font: FontId, color| {
-                                        let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
-                                        job.wrap = egui::text::TextWrapping::truncate_at_width(size);
-                                        ui.painter().layout_job(job)
-                                    };
-                                    let name = line(r.name.clone(), FontId::proportional(13.0), if resp.hovered() { p.accent } else { p.text });
-                                    let meta = line(format!("{} · {}", r.year, r.kind), skin::num(if wired { 16.0 } else { 11.0 }), p.dim);
-                                    let y = art.bottom() + 6.0;
-                                    let below = y + name.size().y + 2.0;
-                                    ui.painter().galley(pos2(art.left(), y), name, p.text);
-                                    ui.painter().galley(pos2(art.left(), below), meta, p.dim);
-                                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&r.name).clicked() {
-                                        goto = Some(Source::Album { id: r.id.clone(), name: r.name.clone() });
-                                    }
-                                }
-                            });
-                        });
-                        skin::char_scroll(ui, &scroll);
+                        let items: Vec<_> = a.releases.iter().map(|r| (r.name.as_str(), r.cover.as_deref(), format!("{} · {}", r.year, r.kind))).collect();
+                        if let Some(i) = strip(ui, "releases", &items, false) {
+                            let r = &a.releases[i];
+                            goto = Some(Source::Album { id: r.id.clone(), name: r.name.clone() });
+                        }
                         ui.add_space(12.0);
                         ui.label(RichText::new(if wired { "TOP SONGS // 人気" } else { "TOP SONGS" }).font(small(sk)).color(p.dim));
                     }
@@ -1111,14 +1256,24 @@ impl App {
                     }
                     let total = s.tracks.len() + ghosts;
                     let mut draw = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
-                        if let (true, Some(row)) = (reveal, cursor) {
+                        if let (true, Some(row), false) = (reveal, cursor, artist_page) {
                             // The cursor's row may be outside the rows laid out: place it from the first of them.
                             let top = ui.cursor().top() + (row as f32 - range.start as f32) * l.row_h;
                             ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(w, l.row_h)), None);
                         }
                         // Artist pages: the latest songs follow the top songs, under their own heading and numbered afresh.
                         let latest_from = s.artist.as_ref().map(|a| a.top).filter(|&n| n > 0 && n < s.tracks.len());
+                        // Only while sorted by date: list order mixes the days.
+                        let dated = view == Source::NewReleases && s.sort.label().is_some();
                         for i in range {
+                            // New releases: a divider with the release day wherever it changes.
+                            let day = s.tracks.get(i).map(|t| t.added).filter(|_| dated);
+                            if day.is_some() && day != i.checked_sub(1).and_then(|j| s.tracks.get(j)).map(|t| t.added) {
+                                ui.add_space(if i == 0 { 8.0 } else { 12.0 }); // the first clears the column header's rule
+                                let text = day_label(day.unwrap_or(0));
+                                skin::divider(ui, &if sk == Skin::Swiss { text } else { text.to_uppercase() }, small(sk), c_num, w);
+                                ui.add_space(2.0);
+                            }
                             if latest_from == Some(i) {
                                 ui.add_space(12.0);
                                 ui.label(RichText::new(if sk == Skin::Wired { "LATEST SONGS // 新着" } else { "LATEST SONGS" }).font(small(sk)).color(p.dim));
@@ -1131,6 +1286,9 @@ impl App {
                             let (rect, r) = ui.allocate_exact_size(vec2(w, l.row_h), Sense::click());
                             let current = t.id == now_id;
                             let on = cursor == Some(i);
+                            // Laid out whole, a row sits where it's drawn (dividers and headings move it): scroll to that.
+                            if artist_page && jump_row == Some(i) { ui.scroll_to_rect(rect, Some(egui::Align::Center)) }
+                            else if artist_page && reveal && on { ui.scroll_to_rect(rect, None) }
                             if moused && r.hovered() { point = Some(i) }
                             let (ink, sub) = skin::row_bg(ui, rect, current, on);
                             // Songs Spotify refused this session fade out.
@@ -1194,10 +1352,23 @@ impl App {
                         }
                     };
                     // Artist pages scroll as a whole (strip + a short list); long lists only lay out visible rows.
-                    if artist_page { draw(ui, 0..total) } else { let scroll = area.show_rows(ui, l.row_h, total, |ui, range| draw(ui, range)); skin::char_scroll(ui, &scroll); }
+                    if artist_page {
+                        draw(ui, 0..total);
+                        // Under the songs: other artists their listeners play.
+                        if let Some(related) = s.artist.as_ref().and_then(|a| a.overview.as_ref()).map(|o| &o.related).filter(|r| !r.is_empty()) {
+                            ui.add_space(16.0);
+                            ui.label(RichText::new(if sk == Skin::Wired { "FANS ALSO LIKE // 関連" } else { "FANS ALSO LIKE" }).font(small(sk)).color(p.dim));
+                            let items: Vec<_> = related.iter().map(|r| (r.name.as_str(), r.image.as_deref(), String::new())).collect();
+                            if let Some(i) = strip(ui, "related", &items, false) {
+                                let r = &related[i];
+                                goto = Some(Source::Artist { id: r.id.clone(), name: r.name.clone() });
+                            }
+                        }
+                    } else { let scroll = area.show_rows(ui, l.row_h, total, |ui, range| draw(ui, range)); skin::char_scroll(ui, &scroll); }
                 };
                 if artist_page {
-                    let scroll = egui::ScrollArea::vertical().id_salt("artist-page").auto_shrink(false).show(ui, rest);
+                    // One scroll per page opened: artist pages, searches and New releases each start at their top.
+                    let scroll = egui::ScrollArea::vertical().id_salt(("page", s.load_id)).auto_shrink(false).show(ui, rest);
                     skin::char_scroll(ui, &scroll);
                 } else {
                     rest(ui);
@@ -1224,6 +1395,7 @@ impl App {
             let (list, src) = (s.tracks.clone(), s.view.clone());
             s.start(&e.player(), list, None, src);
         }
+        if let Some(p) = visit { s.visiting = Some(p) } // before `goto` opens it: its name and owner
         drop(s); // toggle_like locks the state itself
         if let Some(i) = point.filter(|i| cursor != Some(*i)) {
             (self.pane, self.row) = (Pane::Songs, i);
@@ -1231,6 +1403,7 @@ impl App {
         }
         if let Some(id) = like { self.toggle_like(id) }
         if let (Some(id), Some(e)) = (follow, self.engine.get()) { crate::toggle_follow(self.rt.handle(), e, &self.state, id) }
+        if let (true, Some(e)) = (save, self.engine.get()) { crate::save_playlist(self.rt.handle(), e, &self.state, &ctx) }
         if let Some(src) = goto { self.open(src, &ctx) }
         self.apply_menu(menu, &ctx);
     }

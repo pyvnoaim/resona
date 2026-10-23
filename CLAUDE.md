@@ -1,6 +1,6 @@
 # Resona
 
-A small native Spotify player for macOS: Rust, egui/eframe for the UI, librespot for sign-in and playback.
+A small native Spotify player for macOS (Linux and Windows too): Rust, egui/eframe for the UI, librespot for sign-in and playback.
 Three skins, each with a dark and a light palette: **Wired** (Lain-style cyber/pixel, the default), **Swiss**
 (print grid, huge type, one red rule) and **ASCII** (a teletype printout: every widget is 7-bit characters, Courier).
 Others (Y2K, macOS, Phosphor, Brutal) were tried and dropped.
@@ -30,7 +30,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `web_refresh_token` | Web API sign-in (mode 0600) |
 | `settings` | `key=value`: skin, theme, accent (a name or `#rrggbb`), volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
 | `unplayable` | track ids Spotify refused to play, one per line |
-| `following` | followed artist ids, kept from the last good Web API read and from the artist page's Follow button: New releases falls back to it during a ban, and the Follow button reads it |
+| `following` | followed artist ids, kept from New releases' last good read, the Follow button and each artist page's follow check (only once the file exists): New releases falls back to it when neither the session nor the Web API answers, the Follow button when its check can't |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 | `lists/` | each playlist and Liked Songs as last loaded, with its version (`api::list_version`: a playlist's revision, a hash of Liked Songs' ids); opening a list asks only the version and shows this copy while it matches |
 | `audio/` | librespot's cache of songs played lately, up to 1 GB, oldest dropped first |
@@ -42,11 +42,11 @@ Delete the first two to sign in again (and `liked`, `following` and `lists/` too
 | file | what |
 |---|---|
 | `src/main.rs` | `App` (UI state), startup, `open_list()` (load a list), `command()` (all playback), the frame loop |
-| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand; `t` switches a flow-style card and a devboard-style board) on the same engine and the same free functions (`open_list`, `command`, `fetch_lyrics`, `add_to`, …); the songs box can hold the keys (`?`), the playlist picker (`p`) or the lyrics (`v`) instead (`Tui::instead`) |
+| `src/cli.rs` | `resona cli`: full-screen terminal player (crossterm, drawn by hand; `t` switches a flow-style card and a devboard-style board) on the same engine and the same free functions (`open_list`, `command`, `fetch_lyrics`, `add_to`, …); the songs box can hold the keys (`?`), the playlist picker (`p`), the lyrics (`v`) or, with `f`, a search's artists / albums / playlists or an artist's fans-also-like / shows instead (`Tui::instead`) |
 | `src/state.rs` | `State` and the queue: `Source`, `Cmd`, `Repeat`, `start` / `step` / `enqueue` / `set_shuffle` |
 | `src/engine.rs` | librespot: `connect()` (sign-in, session, player, event loop), liked-songs and playlist-contents loaders |
-| `src/api.rs` | Web API (`get`, `WebAuth`, search, like, create and add to playlist) and the session loaders (`session_playlist`, `session_artist`, `session_album`) |
-| `src/ui.rs` | the views: sidebar, track list, player bar, focus view, help overlay, sign-in screen |
+| `src/api.rs` | Web API (`get`, `WebAuth`, like, follow, save, create and add to playlist), the session loaders (`session_playlist`, `session_artist`, `session_album`, `session_following`) and the web player's GraphQL queries (`web_query`: `web_search`, `artist_overview`, `web_releases`) |
+| `src/ui.rs` | the views: sidebar, track list (with search's filter and cover rows, artist pages' header and rows, New releases' day dividers), player bar, focus view, help overlay, sign-in screen |
 | `src/controls.rs` | input: keyboard, macOS menu bar (`muda`), media keys / Now Playing (`souvlaki`) |
 | `src/skin.rs` | how things look: `Skin`, `Look` (sizes), `Pal` (colours), fonts, and the drawn widgets |
 | `src/update.rs` | the launch check for a newer GitHub release, and the update in place (the macOS app in /Applications reruns install.sh; Linux and Windows download the release with curl + tar and rename it over their own binary), then reopen |
@@ -62,14 +62,17 @@ font's default instance.
 - **Two client IDs.** Playback signs in with librespot's shared client ID (`CLIENT_ID` in engine.rs). The Web API
   uses each user's own developer app (`api::client_id`, from `~/.resona/client_id`): the shared ID gets 24h
   rate-limit bans there, and its old keymaster token endpoint answers 503. No ID is built in: without one the
-  window shows a setup screen (`ui::setup`) and the CLI asks in the terminal; nothing connects until it's saved. Both sign-ins use `REDIRECT` (`http://127.0.0.1:8898/login`),
-  which must be listed in the developer app's settings. No client secret is needed (PKCE). Adding a Web API
-  scope to `SCOPES` forces one new browser sign-in.
-- **The Web API is restricted for developer apps**, so several things go through the librespot session instead:
-  playlists you don't own (`Playlist::web_readable` decides), artist pages and album pages. Liked hearts come from
+  window shows a setup screen (`ui::setup`) and the CLI asks in the terminal; nothing connects until it's saved.
+  Both sign-ins use `REDIRECT` (`http://127.0.0.1:8898/login`), which must be listed in the developer app's
+  settings. No client secret is needed (PKCE). Adding a Web API scope to `SCOPES` forces one new browser sign-in.
+- **The Web API is restricted for developer apps**, so several things go through the librespot session instead
+  (or the web player's queries, below): playlists you don't own (`Playlist::web_readable` decides), artist pages,
+  album pages, search, followed artists. Liked hearts come from
   `~/.resona/liked` at once, then fresh on every launch from `load_liked`: Liked Songs resolved as a playback
   context (`spotify:user:<id>:collection`), every id in one session request. The old "are these liked?" lookup
-  (`/me/tracks/contains`) was 403; its replacement, `GET /me/library/contains`, is untried.
+  (`/me/tracks/contains`) was 403; its replacement, `GET /me/library/contains?uris=…` (songs and artists mixed, one
+  bool each), works (checked October 2026): the artist page's Follow button asks it (`api::is_followed`) and falls
+  back to `following`. Hearts don't: a list's worth would be a Web API burst, and `load_liked` refreshes them every launch.
 - **Sort:** songs keep when they were added (`Track.added`, never shown) and their list position (`pos`); every
   loader hands songs to `State::add_tracks`, which numbers and sorts them. Lists without dates ignore the sort.
 - **Refused songs:** librespot reports `Unavailable` for failed *preloads* too; only a failure of the playing track
@@ -94,21 +97,44 @@ font's default instance.
   loaders go through `api::patient` (waits it out) and `session_playlist` paces itself past 200 songs; a starved
   player reports a playable song as `Unavailable`.
 - **Spotify's February 2026 Web API changes:** saving and liking go through `/me/library` (by URI), playlist
-  contents through `/playlists/{id}/items`, new playlists through `POST /me/playlists`, search pages are 10. Check the changelog before adding an endpoint.
+  contents through `/playlists/{id}/items`, new playlists through `POST /me/playlists`, search pages are 10.
+  Check the changelog before adding an endpoint.
 - **Session playlists** are read page by page (`/playlist/v2/playlist/{id}?from=&length=`): librespot's
   `Playlist::get` returns only the first part of a long list.
   Developer apps get day-long bans for bursts, so startup stays small: playlists and Liked Songs only; what's in
   each playlist (`load_members`) waits for the first "Add to playlist" menu. A failed library load is shown, not
   fatal: playback runs on librespot and keeps working through a ban, and the sidebar falls back to the session's
-  rootlist (`session_playlists`: only uploaded covers, mosaics are rebuilt from each list's first albums by `session_mosaic`; every list then opens through the session).
+  rootlist (`session_playlists`: only uploaded covers, mosaics are rebuilt from each list's first albums by
+  `session_mosaic`; every list then opens through the session).
 - **Song radio** (`Source::Radio`): the session's `inspiredby-mix` endpoint turns a song into Spotify's radio
   playlist (`api::radio_playlist`), which then opens like any session playlist. The Web API's recommendations are
   closed to developer apps.
-- **New releases** (`Source::NewReleases`): followed artists from the Web API (`GET /me/following`, scope
-  `user-follow-read`; the session has no such list), then each artist's albums and singles through the session,
-  read newest first only until one is older than two weeks (`session_new_releases`). `Track.added` is the release day.
-  It has no `key`, so it's never the list reopened at launch: that would be a burst at startup.
-- **Search** asks for pages of 10 and stops at 5 pages; newer developer apps get a lower page-size cap.
+- **New releases** (`Source::NewReleases`): followed artists from the session (`session_following`: your
+  profile's following list, so it works through a ban), else the Web API (`GET /me/following`, scope
+  `user-follow-read`), else `following`; then which of each artist's albums and singles are under two weeks old,
+  from the web player's discography query (`web_releases`, one request per artist; else through the session, read
+  newest first only until one is older), and their songs through the session (`session_new_releases`).
+  `Track.added` is the release day: the window draws a dated divider where it changes (`skin::divider`), so this
+  list lays out every row instead of `show_rows`. It has no `key`, so it's never the list reopened at launch: that
+  would be a burst at startup.
+- **The web player's queries** (`api::web_query`): private GraphQL on `api-partner.spotify.com`, signed in with the
+  session's login5 and client tokens, so no developer-app call and no developer-app ban. Each has a fixed
+  persisted-query hash; if one stops answering for good, take the current hash from the web player. Every caller
+  has a fallback or leaves its extra out.
+- **Artist pages:** `queryArtistOverview` (`artist_overview`: monthly listeners, followers, "Fans also like", and
+  the next shows: the first 10 by date plus a total, near-you ones first) and `queryArtistDiscographyAll`
+  (`web_releases`: every release in one request, instead of one session read each). Popularity (0–100, a score,
+  not a count) is in the session's artist record; the session's own `related` list is empty. When a query doesn't
+  answer, the page leaves its numbers, related artists and shows out, and releases fall back to the session
+  (`session_releases`).
+- **Search** goes through the web player's `searchDesktop` query (`api::web_search`): 50 songs plus 50 each of
+  artists, albums and playlists in one request, kept in `State.found` and filtered on the page (All / Songs /
+  Artists / Albums / Playlists; the CLI steps through them with `f`). If it doesn't answer, the Web API's search
+  (songs only, pages of 10, at most 5: newer developer apps get a lower page-size cap). A playlist opened from the
+  results isn't in the sidebar: `State.visiting` holds it for its name and owner (`State::playlist`), it opens
+  through the session when it isn't yours, and it's never saved as the list to reopen at launch; its Save button
+  (`save_playlist`, `PUT /me/library`) adds it to the sidebar. The last search's results are kept
+  (`State.searched`): going back to it doesn't ask again.
 - **Repaints:** nothing redraws when idle; 4 fps while playing, 20 fps while the equaliser bars or meter are on
   screen, ~16 fps while a list is loading.
 - **Toasts:** `State::say` shows a short note above the player bar (3 s, errors 6 s), one at a time; `enqueue`
@@ -124,8 +150,8 @@ font's default instance.
   "macos")`, and macOS-only dependencies); elsewhere the keyboard handles the Ctrl shortcuts, winit the cursor,
   and `set_app_icon` sets the window icon. Shortcut labels go through `ui::cmd_keys` (⌘ → Ctrl). Media keys:
   macOS and Linux (MPRIS over zbus), in the window and the CLI (`controls::media_controls`, shared; the CLI turns
-  the main run loop itself, where macOS delivers them); Windows needs an HWND, not wired yet. `.github/workflows/build.yml` builds
-  all three on every push: the only check that Windows and Linux still compile.
+  the main run loop itself, where macOS delivers them); Windows needs an HWND, not wired yet.
+  `.github/workflows/build.yml` builds all three on every push: the only check that Windows and Linux still compile.
 - **Free accounts:** librespot calls `exit(1)` when a non-Premium account signs in, saying why only in its log.
   `main`'s logger (`Log`) catches that error line and tells the user first (`premium_needed`: an alert on macOS,
   the terminal handed back and a line in the CLI, stderr elsewhere).

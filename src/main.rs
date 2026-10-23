@@ -392,7 +392,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     {
         let mut s = state.lock().unwrap();
         if s.view.as_ref() == Some(&src) { return }
-        (s.view, s.loading, s.error, s.expected, s.artist) = (Some(src.clone()), true, None, None, None);
+        (s.view, s.loading, s.error, s.expected, s.artist, s.found) = (Some(src.clone()), true, None, None, None, None);
         s.load_id += 1;
         s.tracks.clear();
         // Before any song arrives: pages are sorted as they land. A radio keeps Spotify's mix order.
@@ -402,11 +402,22 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             return;
         }
     }
-    if let Some(key) = src.key() { set_setting("last", &key) }
+    // Reopened at launch, before the sidebar is in: only a list that will have its name then.
+    let visiting = matches!(&src, Source::Playlist(id) if !state.lock().unwrap().playlists.iter().any(|p| &p.id == id));
+    if let Some(key) = src.key().filter(|_| !visiting) { set_setting("last", &key) }
+    // Back to the last search: its results again, not a new request.
+    if let Source::Search(q) = &src {
+        let mut s = state.lock().unwrap();
+        if let Some((.., tracks, found)) = s.searched.clone().filter(|(k, at, ..)| k == q && at.elapsed() < Duration::from_secs(600)) {
+            s.add_tracks(tracks);
+            (s.found, s.loading) = (Some(found), false);
+            return;
+        }
+    }
     let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
     let me = e.session().username();
     let foreign = match &src {
-        Source::Playlist(id) => state.lock().unwrap().playlists.iter().any(|p| &p.id == id && !p.web_readable(&me)),
+        Source::Playlist(id) => state.lock().unwrap().playlist(id).is_some_and(|p| !p.web_readable(&me)),
         Source::Radio { .. } => true,
         _ => false,
     };
@@ -441,18 +452,22 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         return;
     }
     if src == Source::NewReleases {
-        // Who you follow (Web API), then each one's last two weeks (session), streamed in release by release.
+        // Who you follow (session, else Web API), then each one's last two weeks (web player, else session), streamed in release by release.
         let (session, me) = (e.session(), state.lock().unwrap().load_id);
         rt.spawn(async move {
             let since = (std::time::SystemTime::now() - Duration::from_secs(14 * 86_400)).duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-            // A ban on the Web API falls back to the last list we got.
-            let artists = match api::followed_artists(&web, &http).await {
+            // The session's list (good through a Web API ban), else the Web API's, else the last list we got.
+            let artists = match api::session_following(&session).await {
+                Some(a) => Ok(a),
+                None => api::followed_artists(&web, &http).await,
+            };
+            let artists = match artists {
                 Ok(a) => { settings::save_following(&a); Ok(a) }
                 Err(e) => settings::load_following().map(|a| a.into_iter().collect()).ok_or(e),
             };
             let done = match artists {
                 Ok(artists) => {
-                    api::session_new_releases(&session, &artists, since, |tracks| {
+                    api::session_new_releases(&session, &http, &artists, since, |tracks| {
                         let mut s = state.lock().unwrap();
                         if s.load_id != me { return false } // user moved on, or opened it again
                         s.add_tracks(tracks);
@@ -475,8 +490,15 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         let session = e.session();
         rt.spawn(async move {
             let got = match &src {
-                Source::Artist { id, .. } => match api::session_artist(&session, id).await {
-                    Ok((portrait, top, releases, latest)) => {
+                Source::Artist { id, .. } => match tokio::join!(api::session_artist(&session, &http, id), api::artist_overview(&session, &http, id),
+                    // Bounded: a rate-limit wait in `api::get` would hold the page; the file answers instead.
+                    tokio::time::timeout(Duration::from_secs(3), api::is_followed(&web, &http, id))) {
+                    (Ok((portrait, popularity, top, releases, latest)), overview, followed) => {
+                        // Follow: what Spotify says now (and the file learns it), else the file from last time.
+                        let followed = match followed {
+                            Ok(Ok(on)) => { settings::set_following(id, on); on }
+                            _ => settings::load_following().is_some_and(|f| f.contains(id.as_str())),
+                        };
                         // No photo in the session's artist record: ask the Web API (middle-sized image).
                         let portrait = match portrait {
                             Some(p) => Some(p),
@@ -484,9 +506,9 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
                                 .and_then(|a| a.images.get(1).or(a.images.first()).map(|i| i.url.clone())),
                         };
                         let n = top.len();
-                        Ok((top.into_iter().chain(latest).collect(), Some(ArtistPage { portrait, releases, top: n, followed: settings::load_following().is_some_and(|f| f.contains(id.as_str())) })))
+                        Ok((top.into_iter().chain(latest).collect(), Some(ArtistPage { portrait, popularity, overview, releases, top: n, followed })))
                     }
-                    Err(e) => Err(e),
+                    (Err(e), ..) => Err(e),
                 },
                 Source::Album { id, .. } => api::session_album(&session, id).await.map(|t| (t, None)),
                 _ => return,
@@ -508,6 +530,17 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     let session = e.session();
     rt.spawn(async move {
         let (edits, sort, me) = { let s = state.lock().unwrap(); (s.liked_edits, s.sort, s.load_id) };
+        // Search: the web player's, with artists, albums and playlists; the Web API's (songs only) if it doesn't answer.
+        if let Source::Search(q) = &src && let Some((tracks, found)) = api::web_search(&session, &http, q).await {
+            let mut s = state.lock().unwrap();
+            if s.load_id != me { return } // user moved on
+            let tracks: Vec<api::Track> = tracks.into_iter().enumerate().map(|(pos, t)| api::Track { pos, ..t }).collect();
+            s.searched = Some((q.clone(), Instant::now(), tracks.clone(), found.clone()));
+            s.add_tracks(tracks);
+            (s.found, s.loading) = (Some(found), false);
+            ctx.request_repaint();
+            return;
+        }
         let key = src.key().unwrap_or_default();
         let version = api::list_version(&session, &src).await;
         if version.as_deref().is_some_and(|v| show_kept(&state, &key, v, me, &ctx)) { return }
@@ -588,6 +621,25 @@ pub fn toggle_like(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, id: 
     });
 }
 
+/// Saves the playlist opened from search to your library; it joins the sidebar once Spotify says yes.
+pub fn save_playlist(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, ctx: &egui::Context) {
+    let Some(p) = state.lock().unwrap().visiting.clone() else { return };
+    let (state, web, http, ctx) = (state.clone(), e.web.clone(), e.http.clone(), ctx.clone());
+    rt.spawn(async move {
+        let done = api::save_playlist(&web, &http, &p.id).await;
+        let mut s = state.lock().unwrap();
+        match done {
+            Ok(()) => {
+                s.say(format!("Saved {} to your library", p.name), false);
+                if !s.playlists.iter().any(|l| l.id == p.id) { s.playlists.insert(0, p) }
+            }
+            Err(err) => s.say(format!("Not saved: {err}"), true),
+        }
+        drop(s);
+        ctx.request_repaint();
+    });
+}
+
 /// Follows or unfollows an artist: the button flips at once, and flips back if Spotify says no.
 pub fn toggle_follow(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, id: String) {
     let artist = id.clone();
@@ -595,10 +647,7 @@ pub fn toggle_follow(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, id
         let mut s = state.lock().unwrap();
         let a = s.artist.as_mut()?;
         a.followed = !a.followed;
-        // The list New releases reads during a ban: keep it in step.
-        let mut kept = settings::load_following().unwrap_or_default();
-        if a.followed { kept.insert(id.clone()); } else { kept.remove(&id); }
-        settings::save_following(&kept.into_iter().collect::<Vec<_>>());
+        settings::set_following(&id, a.followed); // the list New releases reads during a ban: keep it in step
         Some(a.followed)
     };
     let Some(on) = flip(state) else { return };

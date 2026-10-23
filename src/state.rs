@@ -177,6 +177,13 @@ pub struct State {
     pub queue_src: Option<Source>,
     /// Portrait and releases when an artist page is open.
     pub artist: Option<ArtistPage>,
+    /// A search's artists, albums and playlists (its songs are `tracks`), when the web player's search answered.
+    pub found: Option<api::Found>,
+    /// The playlist last opened from search results: not in the sidebar, so its name and owner come from here.
+    pub visiting: Option<api::Playlist>,
+    /// The last search the web player answered (query, when, songs, the rest): going back to it within 10
+    /// minutes shows these again.
+    pub searched: Option<(String, Instant, Vec<api::Track>, api::Found)>,
 }
 
 pub enum Lyrics {
@@ -187,6 +194,11 @@ pub enum Lyrics {
 }
 
 impl State {
+    /// A playlist by id: one of yours from the sidebar, or the one opened from search.
+    pub fn playlist(&self, id: &str) -> Option<&api::Playlist> {
+        self.playlists.iter().find(|p| p.id == id).or(self.visiting.as_ref().filter(|p| p.id == id))
+    }
+
     /// Shows `text` as a toast: 3 s, or 6 s for an error.
     pub fn say(&mut self, text: String, error: bool) {
         let life = std::time::Duration::from_secs(if error { 6 } else { 3 });
@@ -433,9 +445,13 @@ pub fn seed() -> u64 {
     nanos | 1 // xorshift must not start at 0
 }
 
-/// An artist page's extras: the portrait and their albums / EPs / singles.
+/// An artist page's extras: the portrait, their numbers and their albums / EPs / singles.
 pub struct ArtistPage {
     pub portrait: Option<String>,
+    /// Spotify's 0–100 score, not a count.
+    pub popularity: u8,
+    /// Monthly listeners, followers, related artists and shows; `None` when the web player's query didn't answer.
+    pub overview: Option<api::Overview>,
     pub releases: Vec<api::Release>,
     /// How many of `State::tracks` are the top songs; the latest songs follow them.
     pub top: usize,

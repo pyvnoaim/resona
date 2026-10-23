@@ -13,9 +13,19 @@
 - [ ] The rootlist fallback reads one page of 500 entries, and has no covers for lists with Spotify's mosaic.
 - [ ] A followed playlist that wasn't loaded (partial library) can be routed to the Web API and fail (`open_list`).
 - [ ] Two expiring Web API calls can both refresh the token at once (`WebAuth::token`). Harmless today.
-- [ ] New releases asks the Web API for every followed artist and reads them all again on each open; with
-      hundreds of artists the first songs take a while. Cache the artist list (and each artist's newest release)
+- [ ] New releases reads every followed artist again on each open (one discography query each, then the new
+      releases' songs); with hundreds of artists the first songs take a while. Cache each artist's newest release
       for the session if it gets slow.
+- [ ] New releases lays out every row each frame (for its day dividers); fine for a few hundred songs. A much
+      longer list would want the dividers inside `show_rows`.
+- [ ] Search, the artist pages' numbers, related artists, shows and releases ride on the web player's private
+      queries with fixed hashes (`api::web_query`). Each falls back or leaves its part out, but a dead hash goes
+      unnoticed: a startup check that logs it would help.
+- [ ] An artist's shows are only the next 10 by date: one near you further out doesn't come first.
+- [ ] New releases takes the session's following list as complete (it matched all 200 here); if it's capped for
+      bigger libraries, `following` gets saved short. Compare its count with the Web API's once, if it matters.
+- [ ] With the search filter on Artists, Albums or Playlists, the keyboard cursor still walks the hidden songs
+      (Enter is held back).
 - [ ] New releases leaves out songs an artist only features on and compilations (`albums_current` and
       `singles_current` only).
 - [ ] "Add to playlist" puts first the lists you last added to from Resona (`added_to`); adds made in other
@@ -34,6 +44,8 @@
       loop, `cli::turn_run_loop`). A waker thread would bring idle back to zero.
 - [ ] The CLI's key list (`?`) is cut off in short terminals; `c` needs `pbcopy`, `wl-copy`, `xclip` or `clip`
       (nothing over SSH; OSC 52 would reach the local terminal).
+- [ ] The CLI has no day dividers in New releases (its rows are one per song) and no Save key for a playlist
+      opened from search.
 
 ## Ideas
 
@@ -41,7 +53,9 @@
 - [ ] Filter box for the open playlist (search only covers all of Spotify right now).
 - [ ] Click the `>` prompt to focus the search box (only the text area takes clicks now).
 - [ ] Measure CPU of the release build while playing (idle is 0%, ~106 MB). The CLI: ~2% playing, ~34 MB.
-- [ ] Try `GET /me/library/contains` for hearts on visible songs only (would drop the first-run full read).
+- [ ] Hearts for visible songs only through `GET /me/library/contains` (works; the Follow button uses it): would
+      drop the first-run full read, if kept to a few requests.
+- [ ] "Appears on" on artist pages: the overview already lists releases that feature the artist.
 - [ ] Characters the skin fonts lack (`⁻ ˢ ☆` in some titles) show as boxes in the window; a macOS fallback font
       (Arial Unicode, ~23 MB in memory) would cover them.
 - [ ] Plays through librespot don't reach Spotify's history / Wrapped; Last.fm scrobbling would give own stats.

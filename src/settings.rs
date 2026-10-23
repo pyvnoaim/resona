@@ -105,6 +105,14 @@ pub fn save_following(ids: &[String]) {
     write_ids("following", &ids.iter().cloned().collect())
 }
 
+/// Marks one artist followed or not in `following`, so the file keeps up with the Follow button. Only once
+/// there is a file: one started here would hold just this artist, and New releases would take it for the whole list.
+pub fn set_following(id: &str, on: bool) {
+    let Some(mut kept) = load_following() else { return };
+    let changed = if on { kept.insert(id.to_string()) } else { kept.remove(id) };
+    if changed { write_ids("following", &kept) }
+}
+
 /// A list as last loaded, in ~/.resona/lists/: shown at once while Spotify says it's still `version`.
 /// `added` and `pos` ride alongside each song: the Web API never sends them as fields.
 #[derive(serde::Serialize, serde::Deserialize)]

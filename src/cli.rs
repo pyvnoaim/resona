@@ -66,7 +66,7 @@ const ALL_KEYS: &[(&str, &[(&str, &str)])] = &[
     ("move", &[("↑↓ j k", "move"), ("pgup pgdn", "a page"), ("home end", "top, bottom"), ("tab", "library / songs"), ("enter", "open / play"), ("/", "search"), (".", "the playing song")]),
     ("play", &[("space", "pause / play"), ("n b", "next / back"), ("← →", "seek 10 s"), ("+ -", "volume"), ("m", "mute"), ("s", "shuffle"), ("r", "repeat")]),
     ("song", &[("l", "like"), ("a", "queue"), ("A", "play next"), ("i", "song radio"), ("g", "artist"), ("G", "album"), ("p", "add to playlist"), ("c", "copy link")]),
-    ("view", &[("v", "lyrics"), ("o", "sort"), ("t", "card / board"), ("?", "these keys"), ("^L", "redraw"), ("q", "quit")]),
+    ("view", &[("v", "lyrics"), ("f", "artists, fans, shows"), ("o", "sort"), ("t", "card / board"), ("?", "these keys"), ("^L", "redraw"), ("q", "quit")]),
 ];
 
 /// `t` switches: a centred card of titled boxes on the terminal's own background (like flow), or a full-width
@@ -111,6 +111,54 @@ struct Tui {
     picker: Option<Picker>,
     /// `?`: the songs box lists every key.
     all_keys: bool,
+    /// `f`: the songs box lists a search's artists, albums or playlists, or an artist's fans-also-like or shows.
+    cards: Option<Cards>,
+}
+
+/// `f`: which list shows instead of the songs, and the cursor in it.
+struct Cards { kind: Kind, row: usize, top: usize }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind { Artists, Albums, Playlists, Fans, Shows }
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self { Kind::Artists => "artists", Kind::Albums => "albums", Kind::Playlists => "playlists", Kind::Fans => "fans also like", Kind::Shows => "shows" }
+    }
+}
+
+/// What `f` steps through on this page, in order.
+fn kinds(s: &State) -> Vec<Kind> {
+    let mut out = vec![];
+    if let Some(f) = &s.found {
+        if !f.artists.is_empty() { out.push(Kind::Artists) }
+        if !f.albums.is_empty() { out.push(Kind::Albums) }
+        if !f.playlists.is_empty() { out.push(Kind::Playlists) }
+    }
+    if let Some(o) = s.artist.as_ref().and_then(|a| a.overview.as_ref()) {
+        if !o.related.is_empty() { out.push(Kind::Fans) }
+        if !o.shows.is_empty() { out.push(Kind::Shows) }
+    }
+    out
+}
+
+/// One list's rows: name, the dim line beside it, and what Enter opens (shows open nothing).
+fn cards_of(s: &State, kind: Kind) -> Vec<(String, String, Option<Source>)> {
+    let artist = |c: &api::Card| (c.name.clone(), c.note.clone(), Some(Source::Artist { id: c.id.clone(), name: c.name.clone() }));
+    let overview = s.artist.as_ref().and_then(|a| a.overview.as_ref());
+    match (kind, &s.found) {
+        (Kind::Artists, Some(f)) => f.artists.iter().map(artist).collect(),
+        (Kind::Albums, Some(f)) => f.albums.iter().map(|c| (c.name.clone(), c.note.clone(), Some(Source::Album { id: c.id.clone(), name: c.name.clone() }))).collect(),
+        (Kind::Playlists, Some(f)) => f.playlists.iter().map(|p| {
+            let by = p.owner.as_ref().and_then(|o| o.display_name.clone()).map_or(String::new(), |n| format!("by {n}"));
+            (p.name.clone(), by, Some(Source::Playlist(p.id.clone())))
+        }).collect(),
+        (Kind::Fans, _) => overview.map_or(vec![], |o| o.related.iter().map(artist).collect()),
+        (Kind::Shows, _) => overview.map_or(vec![], |o| o.shows.iter().map(|w| {
+            (format!("{} {}  {}, {}", w.day, w.year, w.venue, w.city), format!("{}{}", if w.near { "near you · " } else { "" }, w.title), None)
+        }).collect()),
+        _ => vec![],
+    }
 }
 
 /// `p`: the song, the cursor over your playlists (the last row makes a new one), and the new one's name.
@@ -144,7 +192,7 @@ pub fn run() {
 
     let mut ui = Tui {
         pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, repaint: false, born: Instant::now(), muted: None, side_src: None,
-        me: String::new(), lyrics: false, next_row: 0, lyr_top: 0, picker: None, all_keys: false,
+        me: String::new(), lyrics: false, next_row: 0, lyr_top: 0, picker: None, all_keys: false, cards: None,
         style: if setting("cli_style").as_deref() == Some("board") { Style::Board } else { Style::Card },
         volume: setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7),
     };
@@ -228,6 +276,17 @@ impl Tui {
         let Some(e) = e else { return true };
         // The lyrics cover the song list: its movement keys and Enter go to the lyrics, never to the hidden list.
         let moves = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Enter);
+        if k.code == KeyCode::Char('f') {
+            // The next list this page has, then back to the songs.
+            let kinds = kinds(&state.lock().unwrap());
+            let at = self.cards.as_ref().and_then(|c| kinds.iter().position(|&k| k == c.kind)).map_or(0, |i| i + 1);
+            self.cards = kinds.get(at).map(|&kind| Cards { kind, row: 0, top: 0 });
+            if self.cards.is_some() { (self.pane, self.lyrics) = (Pane::Songs, false) }
+            return true;
+        }
+        if self.cards.is_some() && self.pane == Pane::Songs && (moves || k.code == KeyCode::Esc) { self.cards_key(k, e, state, rt, ctx); return true }
+        // Like the lyrics, the cards cover the songs: song keys act on the playing one.
+        let covered = self.lyrics || self.cards.is_some();
         if self.lyrics && self.pane == Pane::Songs && moves { self.lyrics_key(k, e, state); return true }
         let (lists, rows) = { let s = state.lock().unwrap(); (lists_of(&s).len(), s.tracks.len()) };
         let page = self.body_h.max(1);
@@ -235,7 +294,7 @@ impl Tui {
         let (held, before) = (song_at(self.row), self.row);
         // What l, i, g, G, c and p act on: the song under the cursor, or the playing one (the lists have focus, or
         // the lyrics are up).
-        let pick = { let s = state.lock().unwrap(); if self.pane == Pane::Songs && !self.lyrics { s.tracks.get(self.row) } else { s.now.as_ref() }.cloned() };
+        let pick = { let s = state.lock().unwrap(); if self.pane == Pane::Songs && !covered { s.tracks.get(self.row) } else { s.now.as_ref() }.cloned() };
         let pane = self.pane;
         let open = |src: Option<Source>| -> bool {
             let Some(src) = src else { return false };
@@ -296,7 +355,7 @@ impl Tui {
             KeyCode::Char('/') => self.search = Some(String::new()),
             KeyCode::Char('l') => if let Some(id) = pick.and_then(|t| t.id) { toggle_like(rt, e, state, id) },
             // a: to the end of the queue, A: right after this song.
-            KeyCode::Char(c @ ('a' | 'A')) if pane == Pane::Songs && !self.lyrics => if let Some(t) = pick {
+            KeyCode::Char(c @ ('a' | 'A')) if pane == Pane::Songs && !covered => if let Some(t) = pick {
                 state.lock().unwrap().enqueue(&e.player(), t, c == 'A');
             },
             KeyCode::Char('i') => {
@@ -358,6 +417,31 @@ impl Tui {
                     None if p.name.trim().is_empty() => {}
                     None => { new_playlist(rt, e, state, p.name.trim().to_string(), Some(id), ctx); self.picker = None }
                 }
+            }
+            _ => {}
+        }
+    }
+
+    /// `f` is open: move through its list, Enter opens the one under the cursor, Esc goes back to the songs.
+    fn cards_key(&mut self, k: KeyEvent, e: &Engine, state: &Shared, rt: &tokio::runtime::Handle, ctx: &egui::Context) {
+        let Some(c) = &mut self.cards else { return };
+        let mut s = state.lock().unwrap();
+        let rows = cards_of(&s, c.kind);
+        let (last, page) = (rows.len().saturating_sub(1), self.body_h.max(1));
+        match k.code {
+            KeyCode::Esc => { drop(s); self.cards = None; }
+            KeyCode::Up | KeyCode::Char('k') => c.row = c.row.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => c.row = (c.row + 1).min(last),
+            KeyCode::PageUp => c.row = c.row.saturating_sub(page),
+            KeyCode::PageDown => c.row = (c.row + page).min(last),
+            KeyCode::Home => c.row = 0,
+            KeyCode::End => c.row = last,
+            KeyCode::Enter => {
+                let Some(src) = rows.into_iter().nth(c.row).and_then(|(_, _, src)| src) else { return };
+                // A playlist from search isn't in the library: keep it for its name and owner.
+                if c.kind == Kind::Playlists { s.visiting = s.found.as_ref().and_then(|f| f.playlists.get(c.row).cloned()) }
+                drop(s);
+                open_list(rt, e, state, src, ctx); // the new page closes the cards
             }
             _ => {}
         }
@@ -438,6 +522,20 @@ impl Tui {
             }).collect();
             return Some((format!("add \u{201c}{}\u{201d} to", p.track.name), "enter adds · esc".into(), rows));
         }
+        if let Some(c) = &mut self.cards {
+            let rows = cards_of(s, c.kind);
+            c.row = c.row.min(rows.len().saturating_sub(1));
+            scroll(&mut c.top, c.row, h);
+            let name_w = w * 11 / 20;
+            let lines = (c.top..c.top + h).map(|i| {
+                let mut row = Seg::new(w, if i == c.row { Some(cursor()) } else { bg });
+                if let Some((name, note, _)) = rows.get(i) { row.col(name, FG, name_w).put(note, DIM); }
+                row.done()
+            }).collect();
+            let more = if kinds(s).len() > 1 { "f next" } else { "f songs" };
+            let hint = if c.kind == Kind::Shows { format!("{more} · esc") } else { format!("enter opens · {more} · esc") };
+            return Some((format!("{} · {}", c.kind.name(), rows.len()), hint, lines));
+        }
         if !self.lyrics { return None }
         let Some(now) = &s.now else { return Some(("lyrics".into(), String::new(), vec![center(&[("nothing playing".into(), FAINT)], w, bg)].into_iter().chain(std::iter::repeat_with(blank)).take(h).collect())) };
         let lyrics = s.lyrics.as_ref().filter(|(id, _)| now.id.as_ref() == Some(id)).map(|(_, l)| l);
@@ -512,7 +610,7 @@ impl Tui {
         if let Some(i) = self.side_src.as_ref().and_then(|src| lists.iter().position(|(l, _)| l == src)) { self.side = i }
         if s.view != self.seen {
             // A new list: start at its top, and point the sidebar at it.
-            (self.row, self.row_top, self.seen, self.sel) = (0, 0, s.view.clone(), None);
+            (self.row, self.row_top, self.seen, self.sel, self.cards) = (0, 0, s.view.clone(), None, None);
             if let Some(i) = lists.iter().position(|(src, _)| Some(src) == s.view.as_ref()) { self.side = i }
         }
         if let Some(id) = &self.sel
@@ -784,11 +882,34 @@ fn count(s: &State, spin: &str) -> String {
     match (s.loading, s.expected) {
         (true, Some(n)) => format!("{spin} loading {}/{n}", s.tracks.len()),
         (true, None) => format!("{spin} loading"),
-        _ => match s.sort_label() {
-            Some(l) => format!("{} songs · {l}", s.tracks.len()),
-            None => format!("{} songs", s.tracks.len()),
+        _ => match (s.sort_label(), &s.artist) {
+            (Some(l), _) => format!("{} songs · {l}", s.tracks.len()),
+            // Artist pages: their numbers, and the next show (`f` lists them all).
+            (None, Some(a)) => {
+                let o = a.overview.as_ref();
+                let stats = o.map_or(String::new(), |o| format!(" · {} listeners · {} followers", short(o.listeners), short(o.followers)));
+                let live = o.and_then(|o| o.shows.first()).map_or(String::new(), |w| format!(" · live {}", w.day));
+                format!("{} songs{stats} · popularity {}{live}", s.tracks.len(), a.popularity)
+            }
+            (None, None) if s.found.is_some() => format!("{} songs · f: artists, albums, playlists", s.tracks.len()),
+            (None, None) => format!("{} songs", s.tracks.len()),
         },
     }
+}
+
+/// "18.2M", "950K", "999": a count short enough for the status line.
+fn short(n: u64) -> String {
+    match n {
+        1_000_000.. => format!("{:.1}M", n as f64 / 1e6),
+        10_000.. => format!("{}K", n / 1000),
+        1_000.. => format!("{:.1}K", n as f64 / 1e3),
+        _ => n.to_string(),
+    }
+}
+
+#[test]
+fn shortens_counts() {
+    assert_eq!([short(18_208_296), short(950_412), short(4_321), short(999)], ["18.2M", "950K", "4.3K", "999"]);
 }
 
 /// `k label · k label`, keys bright and labels dim.
@@ -877,6 +998,7 @@ fn title(s: &State, lists: &[(Source, String)]) -> String {
     match &s.view {
         Some(Source::Search(q)) => format!("search \u{201c}{q}\u{201d}"),
         Some(Source::Artist { name, .. } | Source::Album { name, .. }) => name.clone(),
+        Some(Source::Playlist(id)) if !lists.iter().any(|(src, _)| src == &Source::Playlist(id.clone())) => s.playlist(id).map_or(String::new(), |p| p.name.clone()), // from search
         Some(Source::Queue) => "queue".into(),
         Some(Source::Radio { name, .. }) => format!("{name} radio"),
         Some(v) => lists.iter().find(|(src, _)| src == v).map_or(String::new(), |(_, n)| n.clone()),
