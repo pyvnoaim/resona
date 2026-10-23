@@ -437,6 +437,10 @@ pub fn seed() -> u64 {
 pub struct ArtistPage {
     pub portrait: Option<String>,
     pub releases: Vec<api::Release>,
+    /// How many of `State::tracks` are the top songs; the latest songs follow them.
+    pub top: usize,
+    /// Whether you follow them, as `~/.resona/following` last said.
+    pub followed: bool,
 }
 
 #[test]

@@ -38,8 +38,9 @@ fn checks_client_ids() {
     assert!(!valid_client_id("8abbb289e35c43b6977234abdd3520d")); // one short
     assert!(!valid_client_id("https://developer.spotify.com/x"));
 }
-const SCOPES: [&str; 8] = [
+const SCOPES: [&str; 9] = [
     "user-follow-read",
+    "user-follow-modify",
     "user-library-read",
     "user-library-modify",
     "playlist-read-private",
@@ -164,6 +165,11 @@ pub struct Album {
     pub name: String,
     #[serde(default)]
     pub images: Vec<Image>,
+    /// Release day and the album's own artists: filled only on album pages (`session_album`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub released: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<Named>,
 }
 
 
@@ -241,6 +247,12 @@ pub async fn create_playlist(auth: &WebAuth, http: &reqwest::Client, name: &str)
 pub async fn set_liked(auth: &WebAuth, http: &reqwest::Client, id: &str, on: bool) -> Result<(), String> {
     let method = if on { reqwest::Method::PUT } else { reqwest::Method::DELETE };
     send(auth, http, method, &format!("me/library?uris=spotify:track:{id}"), None).await.map(drop)
+}
+
+/// Follows an artist, or unfollows. Through `/me/library` by URI, like liking since the 2026 changes.
+pub async fn set_followed(auth: &WebAuth, http: &reqwest::Client, id: &str, on: bool) -> Result<(), String> {
+    let method = if on { reqwest::Method::PUT } else { reqwest::Method::DELETE };
+    send(auth, http, method, &format!("me/library?uris=spotify:artist:{id}"), None).await.map(drop)
 }
 
 /// One Web API call (with an optional JSON body), auth and rate-limit handling; errors for non-2xx answers.
@@ -499,7 +511,7 @@ impl From<metadata::Track> for Track {
             id: t.id.to_id().ok(),
             name: t.name,
             artists: t.artists.iter().map(|a| Named { id: a.id.to_id().ok(), name: a.name.clone() }).collect(),
-            album: Album { id: t.album.id.to_id().ok(), name: t.album.name, images },
+            album: Album { id: t.album.id.to_id().ok(), name: t.album.name, images, ..Default::default() },
             duration_ms: t.duration.max(0) as u32,
             kind: "track".into(),
             added: 0,
@@ -589,36 +601,60 @@ fn reads_the_radio_playlist() {
     assert_eq!(radio_id(br#"{"total": 0,"mediaItems": []}"#), None);
 }
 
-/// An artist page: portrait, top songs (for the account's country), and every album / EP / single,
-/// newest first. Through the session: the Web API's artist endpoints are hit and miss for developer apps.
-pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<String>, Vec<Track>, Vec<Release>), String> {
+/// An artist page: portrait, top songs (for the account's country), every album / EP / single newest
+/// first, and the latest songs (the newest releases' first ten). Through the session: the Web API's artist endpoints are hit and miss for developer apps.
+pub async fn session_artist(session: &Session, id: &str) -> Result<(Option<String>, Vec<Track>, Vec<Release>, Vec<Track>), String> {
     let uri = SpotifyUri::from_uri(&format!("spotify:artist:{id}")).map_err(|e| e.to_string())?;
     let artist = metadata::Artist::get(session, &uri).await.map_err(|e| format!("Artist: {e}"))?;
     // Spotify fills `portrait_group` more often than `portraits`; main.rs falls back to the Web API.
     let portrait = cover_url(&artist.portrait_group).or_else(|| cover_url(&artist.portraits));
     let top = session_tracks(session, &artist.top_tracks.for_country(&session.country()).0).await;
     let ids: Vec<SpotifyUri> = artist.albums_current().chain(artist.singles_current()).chain(artist.compilations_current()).cloned().collect();
-    let mut releases = Vec::with_capacity(ids.len());
+    let mut albums = Vec::with_capacity(ids.len());
     for chunk in ids.chunks(25) {
         let mut set = tokio::task::JoinSet::new();
         for u in chunk {
             let (session, u) = (session.clone(), u.clone());
-            set.spawn(async move { metadata::Album::get(&session, &u).await });
+            set.spawn(async move { patient(|| metadata::Album::get(&session, &u)).await });
         }
-        while let Some(Ok(Ok(a))) = set.join_next().await {
-            use metadata::album::AlbumType::*;
-            releases.push(Release {
-                id: a.id.to_id().unwrap_or_default(),
-                year: a.date.year(),
-                kind: match a.album_type { SINGLE => "SINGLE", EP => "EP", COMPILATION => "COMPILATION", _ => "ALBUM" },
-                cover: cover_url(&a.covers),
-                name: a.name,
-            });
+        while let Some(done) = set.join_next().await {
+            if let Ok(Ok(a)) = done { albums.push(a) } // one unreadable release keeps the others
         }
     }
-    releases.sort_by(|a, b| b.year.cmp(&a.year).then(a.name.cmp(&b.name)));
-    releases.dedup_by(|a, b| a.id == b.id);
-    Ok((portrait, top, releases))
+    albums.sort_by_key(|a| std::cmp::Reverse(a.date.as_timestamp_ms()));
+    albums.dedup_by(|a, b| a.id == b.id);
+    // Latest songs: the newest releases' songs, newest first, as many as the top songs list holds.
+    let fresh: Vec<SpotifyUri> = albums.iter().flat_map(|a| a.tracks().cloned()).take(10).collect();
+    let latest = session_tracks(session, &fresh).await;
+    let releases = albums.into_iter().map(|a| {
+        use metadata::album::AlbumType::*;
+        Release {
+            id: a.id.to_id().unwrap_or_default(),
+            year: a.date.year(),
+            kind: match a.album_type { SINGLE => "SINGLE", EP => "EP", COMPILATION => "COMPILATION", _ => "ALBUM" },
+            cover: cover_url(&a.covers),
+            name: a.name,
+        }
+    }).collect();
+    Ok((portrait, top, releases, latest))
+}
+
+#[test]
+#[ignore = "live: needs ~/.resona/credentials.json and the network (cargo test -- --ignored)"]
+fn artist_page_lists_releases_newest_first() {
+    use librespot::core::{cache::Cache, config::SessionConfig};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cache = Cache::new(Some(std::env::home_dir().unwrap().join(".resona")), None, None, None).unwrap();
+        let creds = cache.credentials().expect("signed in");
+        let session = Session::new(SessionConfig::default(), Some(cache));
+        session.connect(creds, true).await.unwrap();
+        let (_, top, releases, latest) = session_artist(&session, "3qiHUAX7zY4Qnjx8TNUzVx").await.unwrap(); // Yeat
+        for r in &releases { eprintln!("{} {} {}", r.year, r.kind, r.name) }
+        for t in &latest { eprintln!("latest: {} ({})", t.name, t.album.name) }
+        assert!(!top.is_empty() && !latest.is_empty());
+        assert!(releases.windows(2).all(|w| w[0].year >= w[1].year));
+    });
 }
 
 /// The artists you follow (ids), through the Web API: the session has no such list.
@@ -690,7 +726,26 @@ pub async fn session_album(session: &Session, id: &str) -> Result<Vec<Track>, St
     let uri = SpotifyUri::from_uri(&format!("spotify:album:{id}")).map_err(|e| e.to_string())?;
     let album = metadata::Album::get(session, &uri).await.map_err(|e| format!("Album: {e}"))?;
     let uris: Vec<SpotifyUri> = album.tracks().cloned().collect();
-    Ok(session_tracks(session, &uris).await)
+    let d = album.date.as_utc();
+    let released = release_day(d.year(), d.month() as u8, d.day());
+    let by: Vec<Named> = album.artists.iter().map(|a| Named { id: a.id.to_id().ok(), name: a.name.clone() }).collect();
+    let mut tracks = session_tracks(session, &uris).await;
+    for t in &mut tracks { (t.album.released, t.album.by) = (released.clone(), by.clone()) }
+    Ok(tracks)
+}
+
+/// "9 Aug 2024". librespot turns a year-only date into 1 January, so that day shows as the year alone.
+// ponytail: a real 1 January release shows as its year too; the date's precision is lost inside librespot.
+fn release_day(year: i32, month: u8, day: u8) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    if (month, day) == (1, 1) { return year.to_string() }
+    format!("{day} {} {year}", MONTHS[(month.clamp(1, 12) - 1) as usize])
+}
+
+#[test]
+fn release_day_reads_like_a_date_and_a_bare_year_stays_bare() {
+    assert_eq!(release_day(2024, 8, 9), "9 Aug 2024");
+    assert_eq!(release_day(1999, 1, 1), "1999");
 }
 
 #[test]

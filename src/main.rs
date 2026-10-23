@@ -462,14 +462,15 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         rt.spawn(async move {
             let got = match &src {
                 Source::Artist { id, .. } => match api::session_artist(&session, id).await {
-                    Ok((portrait, top, releases)) => {
+                    Ok((portrait, top, releases, latest)) => {
                         // No photo in the session's artist record: ask the Web API (middle-sized image).
                         let portrait = match portrait {
                             Some(p) => Some(p),
                             None => api::get::<api::ArtistImages>(&web, &http, &format!("artists/{id}")).await.ok()
                                 .and_then(|a| a.images.get(1).or(a.images.first()).map(|i| i.url.clone())),
                         };
-                        Ok((top, Some(ArtistPage { portrait, releases })))
+                        let n = top.len();
+                        Ok((top.into_iter().chain(latest).collect(), Some(ArtistPage { portrait, releases, top: n, followed: settings::load_following().is_some_and(|f| f.contains(id.as_str())) })))
                     }
                     Err(e) => Err(e),
                 },
@@ -568,6 +569,30 @@ pub fn toggle_like(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, id: 
     rt.spawn(async move {
         if let Err(err) = api::set_liked(&web, &http, &id, on).await {
             set_like(&state, &id, !on);
+            state.lock().unwrap().error = Some(err);
+        }
+    });
+}
+
+/// Follows or unfollows an artist: the button flips at once, and flips back if Spotify says no.
+pub fn toggle_follow(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, id: String) {
+    let artist = id.clone();
+    let flip = move |state: &Shared| {
+        let mut s = state.lock().unwrap();
+        let a = s.artist.as_mut()?;
+        a.followed = !a.followed;
+        // The list New releases reads during a ban: keep it in step.
+        let mut kept = settings::load_following().unwrap_or_default();
+        if a.followed { kept.insert(id.clone()); } else { kept.remove(&id); }
+        settings::save_following(&kept.into_iter().collect::<Vec<_>>());
+        Some(a.followed)
+    };
+    let Some(on) = flip(state) else { return };
+    let (state, web, http) = (state.clone(), e.web.clone(), e.http.clone());
+    rt.spawn(async move {
+        if let Err(err) = api::set_followed(&web, &http, &artist, on).await {
+            // ponytail: flips back whatever artist page is open now; fine unless you switch pages within the request.
+            flip(&state);
             state.lock().unwrap().error = Some(err);
         }
     });

@@ -30,7 +30,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `web_refresh_token` | Web API sign-in (mode 0600) |
 | `settings` | `key=value`: skin, theme, accent (a name or `#rrggbb`), volume, last open list, `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
 | `unplayable` | track ids Spotify refused to play, one per line |
-| `following` | followed artist ids, kept from the last good Web API read: New releases falls back to it during a ban |
+| `following` | followed artist ids, kept from the last good Web API read and from the artist page's Follow button: New releases falls back to it during a ban, and the Follow button reads it |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 | `lists/` | each playlist and Liked Songs as last loaded, with its version (`api::list_version`: a playlist's revision, a hash of Liked Songs' ids); opening a list asks only the version and shows this copy while it matches |
 | `audio/` | librespot's cache of songs played lately, up to 1 GB, oldest dropped first |

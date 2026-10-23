@@ -523,7 +523,10 @@ fn thumb_fills_its_share_and_stops_at_the_end() {
 /// the side, a `-` rail with a `#` thumb along the bottom.
 pub fn char_scroll<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R>) {
     if skin(ui.ctx()) != Skin::Ascii { return }
-    let (p, inner, lane) = (pal(ui.ctx()), out.inner_rect, ui.spacing().scroll.allocated_width());
+    // `inner_rect` is the room the area was offered, not the size it shrank to: a strip of covers would get
+    // its bar at the bottom of the window. Shrunk to the content, it sits right under them.
+    let inner = Rect::from_min_size(out.inner_rect.min, out.inner_rect.size().min(out.content_size));
+    let (p, lane) = (pal(ui.ctx()), ui.spacing().scroll.allocated_width());
     let font = mono(11.0, true);
     let c = cell(ui.painter(), &font);
     // (cells, seen, all, offset, where the rail starts, the rail's character, between cells)

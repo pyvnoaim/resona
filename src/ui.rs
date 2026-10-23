@@ -863,7 +863,7 @@ impl App {
         let kind = kind.as_str();
         let (mut clicked, mut like) = (self.enter.take(), None); // Enter plays like a click
         let (mut goto, mut play_all, mut point): (Option<Source>, Option<bool>, Option<usize>) = (None, None, None);
-        let mut resort = false;
+        let (mut resort, mut follow) = (false, None::<String>);
         // "Jump to the playing song": once its row is in the list, scroll there (and stop asking).
         let jump_row = self.jump.as_ref().and_then(|id| s.tracks.iter().position(|t| t.id.as_ref() == Some(id)));
         if jump_row.is_some() || !s.loading && s.view.is_some() && self.jump.is_some() && !s.tracks.is_empty() { self.jump = None }
@@ -907,6 +907,20 @@ impl App {
                             let (rule, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
                             ui.painter().rect_filled(rule, 0.0, p.accent);
                         }
+                        // Album pages: who made it (each name leads to their page) and the release day.
+                        let album = s.tracks.first().map(|t| &t.album).filter(|_| matches!(view, Source::Album { .. }));
+                        if let Some(a) = album.filter(|a| !a.by.is_empty()) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                for (i, by) in a.by.iter().enumerate() {
+                                    if i > 0 { ui.label(RichText::new(", ").font(small(sk)).color(p.text)); }
+                                    let r = ui.label(RichText::new(skin::plain(sk, &by.name)).font(small(sk)).color(p.text));
+                                    let Some(id) = &by.id else { continue };
+                                    if link(ui, r.rect, egui::Id::new(("album-by", i)), p.text).clicked() { goto = Some(Source::Artist { id: id.clone(), name: by.name.clone() }) }
+                                }
+                            });
+                        }
+                        let released = album.map(|a| a.released.as_str()).filter(|d| !d.is_empty());
                         let n = s.tracks.len();
                         let count = match sk {
                             Skin::Wired | Skin::Ascii => format!("{n:02} {unit}"),
@@ -932,6 +946,11 @@ impl App {
                                 let total: u64 = s.tracks.iter().map(|t| t.duration_ms as u64).sum();
                                 let length = if matches!(sk, Skin::Swiss) { total_length(total) } else { total_length(total).to_uppercase() };
                                 let count = if n > 0 { format!("{count} · {length}") } else { count };
+                                let count = match released {
+                                    Some(d) if matches!(sk, Skin::Swiss) => format!("{count} · {d}"),
+                                    Some(d) => format!("{count} · {}", d.to_uppercase()),
+                                    None => count,
+                                };
                                 let count = match s.sort_label() {
                                     Some(l) if matches!(sk, Skin::Swiss) => format!("{count} · {l}"),
                                     Some(l) => format!("{count} · {}", l.to_uppercase()),
@@ -946,6 +965,10 @@ impl App {
                                 let caps = !matches!(sk, Skin::Swiss);
                                 if skin::action_button(ui, if caps { "▶ PLAY" } else { "Play" }, true).clicked() { play_all = Some(false) }
                                 if skin::action_button(ui, if caps { "SHUFFLE" } else { "Shuffle" }, false).clicked() { play_all = Some(true) }
+                                if let (Source::Artist { id, .. }, Some(a)) = (&view, &s.artist) {
+                                    let text = match (a.followed, caps) { (true, true) => "FOLLOWING", (true, false) => "Following", (false, true) => "FOLLOW", (false, false) => "Follow" };
+                                    if skin::action_button(ui, text, false).clicked() { follow = Some(id.clone()) }
+                                }
                                 // Only where it does something: lists with dates (not search, albums, artists).
                                 if s.tracks.iter().any(|t| t.added > 0) {
                                     let order = s.sort.label().unwrap_or("list order");
@@ -1062,7 +1085,14 @@ impl App {
                             let top = ui.cursor().top() + (row as f32 - range.start as f32) * l.row_h;
                             ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(w, l.row_h)), None);
                         }
+                        // Artist pages: the latest songs follow the top songs, under their own heading and numbered afresh.
+                        let latest_from = s.artist.as_ref().map(|a| a.top).filter(|&n| n > 0 && n < s.tracks.len());
                         for i in range {
+                            if latest_from == Some(i) {
+                                ui.add_space(12.0);
+                                ui.label(RichText::new(if sk == Skin::Wired { "LATEST SONGS // 新着" } else { "LATEST SONGS" }).font(small(sk)).color(p.dim));
+                                ui.add_space(4.0);
+                            }
                             let Some(t) = s.tracks.get(i) else {
                                 skin::ghost_row(ui, w, [c_num, c_title, if one_line { c_artist } else { c_album }, c_dur], i - s.tracks.len() == scan);
                                 continue;
@@ -1079,7 +1109,7 @@ impl App {
                                 skin::now_mark(ui.painter(), pos2(x + c_num, y), ink, sk, s.since.is_some(), ui.input(|i| i.time));
                                 self.bars_shown.set(true);
                             } else {
-                                let n = format!("{:02}", i + 1);
+                                let n = format!("{:02}", i - latest_from.filter(|&f| i >= f).unwrap_or(0) + 1);
                                 ui.painter().text(pos2(x + c_num, y), egui::Align2::LEFT_CENTER, n, num_font.clone(), p.dim);
                             }
                             // One left-aligned, truncated label per cell; returns where its text landed.
@@ -1169,6 +1199,7 @@ impl App {
             ctx.request_repaint(); // draw the highlight where it is now
         }
         if let Some(id) = like { self.toggle_like(id) }
+        if let (Some(id), Some(e)) = (follow, self.engine.get()) { crate::toggle_follow(self.rt.handle(), e, &self.state, id) }
         if let Some(src) = goto { self.open(src, &ctx) }
         self.apply_menu(menu, &ctx);
     }
