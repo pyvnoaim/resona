@@ -159,13 +159,25 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         return out;
     };
     let swiss = sk == Skin::Swiss;
+    // A new song fades in and rises a little (0.45 s, eased out). Opening the view on a song already seen doesn't.
+    let key = t.id.clone().unwrap_or_else(|| t.name.clone());
+    let time = ui.input(|i| i.time);
+    let since = ui.ctx().data_mut(|d| {
+        let seen = d.get_temp_mut_or_insert_with(egui::Id::new("focus-song"), || (key.clone(), f64::NEG_INFINITY));
+        if seen.0 != key { *seen = (key, time) }
+        seen.1
+    });
+    let k = ((time - since) / 0.45).clamp(0.0, 1.0) as f32;
+    if k < 1.0 { ui.ctx().request_repaint() }
+    let k = 1.0 - (1.0 - k).powi(3);
+    let rise = (1.0 - k) * 14.0;
     // Backdrop (Wired only; ASCII never shows real art): the smallest cover, blown up without smoothing, under a dark veil.
     if let (Skin::Wired, Some(thumb)) = (sk, t.thumb()) {
         let side = full.width().max(full.height());
         let uv_w = full.width() / side;
         let uv_h = full.height() / side;
         let uv = Rect::from_center_size(pos2(0.5, 0.5), vec2(uv_w, uv_h));
-        egui::Image::new(thumb).texture_options(egui::TextureOptions::NEAREST).uv(uv).paint_at(ui, full);
+        egui::Image::new(thumb).texture_options(egui::TextureOptions::NEAREST).uv(uv).tint(egui::Color32::WHITE.gamma_multiply(k)).paint_at(ui, full);
         ui.painter().rect_filled(full, 0.0, p.ground.gamma_multiply(0.68));
     }
 
@@ -179,6 +191,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
     let here = if sk == Skin::Wired { "now.exe · 再生中" } else if caps { "NOW PLAYING" } else { "Now Playing" };
     ui.painter().text(full.right_top() + vec2(-22.0, 28.0), egui::Align2::RIGHT_CENTER, here, hint, p.dim);
 
+    ui.multiply_opacity(k);
     let lyrics = s.lyrics.as_ref().filter(|(id, _)| Some(id) == t.id.as_ref()).map(|(_, l)| l);
     let has_lyrics = matches!(lyrics, Some(Lyrics::Lines { .. }));
     let art = (full.height() * if has_lyrics { 0.44 } else { 0.38 }).clamp(140.0, 360.0);
@@ -307,7 +320,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
     };
     if swiss {
         // Five twelfths for the cover, the other seven for the words, tops aligned on the rule.
-        let area = Rect::from_min_max(full.min + vec2(56.0, 72.0), full.max - vec2(56.0, 40.0));
+        let area = Rect::from_min_max(full.min + vec2(56.0, 72.0 + rise), full.max - vec2(56.0, 40.0 - rise));
         let gap = 40.0;
         let side = ((area.width() - gap) * 5.0 / 12.0).min(area.height()).min(560.0);
         let cover = Rect::from_min_size(pos2(area.left(), area.center().y - side / 2.0), vec2(side, side));
@@ -317,7 +330,7 @@ pub fn focus(ui: &mut egui::Ui, s: &State) -> FocusOut {
         let mut col = ui.new_child(egui::UiBuilder::new().max_rect(words.with_min_y(words.top() + 18.0)).layout(egui::Layout::top_down(egui::Align::Min)));
         body(&mut col, false, (side * 0.16).clamp(36.0, 88.0));
     } else {
-        ui.add_space(((full.height() - art - below) / 2.0).max(52.0));
+        ui.add_space(((full.height() - art - below) / 2.0).max(52.0) + rise);
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
             skin::cover(ui, cover_url, art, Stamp::None, true);
