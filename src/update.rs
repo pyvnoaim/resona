@@ -46,12 +46,16 @@ pub fn in_place() -> bool {
     if cfg!(target_os = "macos") { exe.starts_with("/Applications/Resona.app") } else { cfg!(target_arch = "x86_64") && !exe.starts_with(env!("CARGO_MANIFEST_DIR")) }
 }
 
-/// Downloads and installs the latest release on its own thread; the result says why it failed.
-pub fn install() -> JoinHandle<Result<(), String>> {
-    std::thread::spawn(|| {
+/// Downloads and installs the latest release on its own thread; the result says why it failed. The Mac runs
+/// install.sh as tagged with `tag`, not as it is on main, so a later edit there can't break this update.
+pub fn install(tag: &str) -> JoinHandle<Result<(), String>> {
+    let tag = tag.to_string();
+    std::thread::spawn(move || {
         if cfg!(target_os = "macos") {
-            let script = format!("f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/{REPO}/main/install.sh -o \"$f\" && sh \"$f\"; s=$?; rm -f \"$f\"; exit $s");
-            return run(Command::new("sh").args(["-c", &script]));
+            // The URL goes in as $0, not into the script: a tag can hold characters the shell would read.
+            let url = format!("https://raw.githubusercontent.com/{REPO}/{tag}/install.sh");
+            let script = "f=$(mktemp) && curl -fsSL \"$0\" -o \"$f\" && sh \"$f\"; s=$?; rm -f \"$f\"; exit $s";
+            return run(Command::new("sh").args(["-c", script, &url]));
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let asset = if cfg!(windows) { "resona-windows-x86_64.zip" } else { "resona-linux-x86_64.tar.gz" };

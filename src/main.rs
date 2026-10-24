@@ -157,7 +157,7 @@ impl App {
         if self.updating.is_some() { ctx.request_repaint_after(Duration::from_millis(250)) }
         let in_place = update::in_place();
         match ui::update_dialog(ctx, &tag, self.updating.is_some(), in_place) {
-            Some(true) if in_place => self.updating = Some(update::install()),
+            Some(true) if in_place => self.updating = Some(update::install(&tag)),
             Some(true) => {
                 ctx.open_url(egui::OpenUrl::new_tab(update::page(&tag)));
                 self.state.lock().unwrap().update = None;
