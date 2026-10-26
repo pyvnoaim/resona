@@ -34,6 +34,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
 | `lists/` | each playlist and Liked Songs as last loaded, with its version (`api::list_version`: a playlist's revision, a hash of Liked Songs' ids); opening a list asks only the version and shows this copy while it matches |
 | `audio/` | librespot's cache of songs played lately, up to 1 GB, oldest dropped first |
+| `now-playing` | JSON of the song (`title`, `artist`, `cover` URL, `playing`), rewritten by `controls::media_show` whenever it changes, for other apps (notchroom's record player); stale once Resona quits |
 
 Delete the first two to sign in again (and `liked`, `following` and `lists/` too when switching accounts: they hold that account's hearts, artists and lists).
 

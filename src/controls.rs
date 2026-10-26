@@ -288,6 +288,13 @@ pub fn media_show(controls: &mut souvlaki::MediaControls, s: &State, sent: &mut 
     use souvlaki::{MediaMetadata, MediaPlayback, MediaPosition};
     let now = (s.now.as_ref().and_then(|t| t.id.clone()), s.since.is_some(), s.pos_ms);
     if now == *sent { return }
+    // the same, as a file for other apps on this Mac (notchroom's record player)
+    if let Ok(json) = serde_json::to_vec(&serde_json::json!({
+        "title": s.now.as_ref().map(|t| t.name.as_str()),
+        "artist": s.now.as_ref().map(|t| t.artist_line()),
+        "cover": s.now.as_ref().and_then(|t| t.album.images.first()).map(|i| i.url.as_str()),
+        "playing": s.since.is_some(),
+    })) { let _ = std::fs::write(crate::settings::resona_dir().join("now-playing"), json); }
     if now.0 != sent.0 && let Some(t) = &s.now {
         let artist = t.artist_line();
         let _ = controls.set_metadata(MediaMetadata {
