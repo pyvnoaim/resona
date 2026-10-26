@@ -498,10 +498,9 @@ fn shortcut_labels_fit_the_platform() {
     else { assert_eq!((word.as_str(), glued.as_str()), ("Ctrl Shift C", "Next (Ctrl+→)")) }
 }
 
-/// The "?" overlay: every shortcut, grouped, in the skin's own window style.
-/// "Resona v0.2.0 is out": Update (`Some(true)`) or Later (`Some(false)`). `busy` while install.sh runs;
-/// `in_place` says whether Update installs it here or opens the release page.
-pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, in_place: bool) -> Option<bool> {
+/// "Resona v0.2.0 is out": Update (`Some(true)`) or Later (`Some(false)`). `busy` (bytes downloaded, size or
+/// 0) while it updates; `in_place` says whether Update installs it here or opens the release page.
+pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: Option<(usize, usize)>, in_place: bool) -> Option<bool> {
     let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
     let mut pick = None;
     egui::Area::new(egui::Id::new("update")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
@@ -512,15 +511,23 @@ pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, in_place: bool)
             ui.add_space(8.0);
             ui.label(RichText::new(format!("Resona {tag} is out")).font(skin::title(22.0)).color(p.text));
             ui.add_space(6.0);
+            let mb = |n: usize| n as f64 / 1e6;
             let how = match (busy, in_place) {
-                (true, _) => "Updating. Resona reopens when it's done.",
-                (false, true) => "Update now? It downloads, installs, and Resona reopens.",
-                (false, false) => "Update opens the release page to download it.",
+                (Some((got, size)), _) if size > 0 && got >= size => "Installing. Resona reopens when it's done.".to_string(),
+                (Some((got, size)), _) if size > 0 => format!("Downloading: {:.1} of {:.1} MB", mb(got), mb(size)),
+                (Some((got, _)), _) => format!("Downloading: {:.1} MB", mb(got)),
+                (None, true) => "Update now? It downloads, installs, and Resona reopens.".into(),
+                (None, false) => "Update opens the release page to download it.".into(),
             };
             ui.label(RichText::new(how).size(13.0).color(p.dim));
+            if let Some((got, size)) = busy {
+                ui.add_space(8.0);
+                skin::progress(ui, 336.0, got, (size > 0).then_some(size));
+                ui.add_space(4.0);
+            }
             ui.hyperlink_to(RichText::new("What's new").size(13.0).color(p.accent), crate::update::page(tag));
             ui.add_space(12.0);
-            if !busy {
+            if busy.is_none() {
                 ui.horizontal(|ui| {
                     if skin::action_button(ui, "Update", true).clicked() { pick = Some(true) }
                     if skin::action_button(ui, "Later", false).clicked() { pick = Some(false) }
@@ -531,6 +538,7 @@ pub fn update_dialog(ctx: &egui::Context, tag: &str, busy: bool, in_place: bool)
     pick
 }
 
+/// The "?" overlay: every shortcut, grouped, in the skin's own window style.
 pub fn help_overlay(ctx: &egui::Context) {
     let (p, sk) = (skin::pal(ctx), skin::skin(ctx));
     let groups: [(&str, &[(&str, &str)]); 5] = [

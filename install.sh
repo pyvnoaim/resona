@@ -8,9 +8,13 @@ set -e
 [ "$(uname)" = Darwin ] || { echo "install.sh is for macOS; on Linux and Windows download a build from the releases page"; exit 1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-echo "downloading the latest Resona..."
-curl -fsSL https://github.com/pyvnoaim/resona/releases/latest/download/Resona-macos.zip -o "$tmp/Resona.zip"
-ditto -x -k "$tmp/Resona.zip" "$tmp"
+# The app's own update downloads the zip first (to show its progress) and hands it over in RESONA_ZIP.
+zip=${RESONA_ZIP:-$tmp/Resona.zip}
+if [ -z "$RESONA_ZIP" ]; then
+  echo "downloading the latest Resona..."
+  curl -fsSL https://github.com/pyvnoaim/resona/releases/latest/download/Resona-macos.zip -o "$zip"
+fi
+ditto -x -k "$zip" "$tmp"
 rm -rf /Applications/Resona.app
 mv "$tmp/Resona.app" /Applications/
 touch /Applications/Resona.app

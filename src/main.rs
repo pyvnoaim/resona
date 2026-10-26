@@ -77,7 +77,7 @@ struct App {
     #[cfg(target_os = "macos")]
     menu_rx: std::sync::mpsc::Receiver<muda::MenuEvent>,
     /// The update downloading and installing after Update was clicked (`update::install`).
-    updating: Option<std::thread::JoinHandle<Result<(), String>>>,
+    updating: Option<(std::thread::JoinHandle<Result<(), String>>, update::Progress)>,
 }
 
 impl App {
@@ -139,8 +139,8 @@ impl App {
     /// The update dialog while a newer release is on offer, and install.sh once Update was clicked.
     fn offer_update(&mut self, ctx: &egui::Context) {
         let Some(tag) = self.state.lock().unwrap().update.clone() else { return };
-        if self.updating.as_ref().is_some_and(|u| u.is_finished()) {
-            let done = self.updating.take().unwrap().join().unwrap_or_else(|_| Err("the update stopped".into()));
+        if self.updating.as_ref().is_some_and(|u| u.0.is_finished()) {
+            let done = self.updating.take().unwrap().0.join().unwrap_or_else(|_| Err("the update stopped".into()));
             match done {
                 Ok(()) => {
                     update::reopen();
@@ -154,10 +154,11 @@ impl App {
             }
             return;
         }
-        if self.updating.is_some() { ctx.request_repaint_after(Duration::from_millis(250)) }
+        if self.updating.is_some() { ctx.request_repaint_after(Duration::from_millis(100)) }
+        let got = self.updating.as_ref().map(|u| update::progress(&u.1));
         let in_place = update::in_place();
-        match ui::update_dialog(ctx, &tag, self.updating.is_some(), in_place) {
-            Some(true) if in_place => self.updating = Some(update::install(&tag)),
+        match ui::update_dialog(ctx, &tag, got, in_place) {
+            Some(true) if in_place => self.updating = Some(update::install(&tag, self.rt.handle().clone())),
             Some(true) => {
                 ctx.open_url(egui::OpenUrl::new_tab(update::page(&tag)));
                 self.state.lock().unwrap().update = None;

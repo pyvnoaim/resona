@@ -1,9 +1,14 @@
-//! New releases on GitHub: one check at launch, and the update in place: the Mac app reruns install.sh, Linux
-//! and Windows swap their own binary for the release's, and Resona reopens.
+//! New releases on GitHub: one check at launch, and the update in place: the release is downloaded (counted, for
+//! the dialog's bar), then the Mac app reruns install.sh on it, Linux and Windows swap their own binary for the
+//! release's, and Resona reopens.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 const REPO: &str = "pyvnoaim/resona";
 
@@ -46,34 +51,62 @@ pub fn in_place() -> bool {
     if cfg!(target_os = "macos") { exe.starts_with("/Applications/Resona.app") } else { cfg!(target_arch = "x86_64") && !exe.starts_with(env!("CARGO_MANIFEST_DIR")) }
 }
 
-/// Downloads and installs the latest release on its own thread; the result says why it failed. The Mac runs
-/// install.sh as tagged with `tag`, not as it is on main, so a later edit there can't break this update.
-pub fn install(tag: &str) -> JoinHandle<Result<(), String>> {
-    let tag = tag.to_string();
-    std::thread::spawn(move || {
-        if cfg!(target_os = "macos") {
-            // The URL goes in as $0, not into the script: a tag can hold characters the shell would read.
-            let url = format!("https://raw.githubusercontent.com/{REPO}/{tag}/install.sh");
-            let script = "f=$(mktemp) && curl -fsSL \"$0\" -o \"$f\" && sh \"$f\"; s=$?; rm -f \"$f\"; exit $s";
-            return run(Command::new("sh").args(["-c", script, &url]));
-        }
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let asset = if cfg!(windows) { "resona-windows-x86_64.zip" } else { "resona-linux-x86_64.tar.gz" };
-        // Unpacked beside the binary, so the swap is a rename on one disk.
-        let tmp = exe.with_file_name(".resona-update");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        let swapped = swap(&exe, &tmp, asset);
-        let _ = std::fs::remove_dir_all(&tmp);
-        swapped
-    })
+/// Bytes downloaded so far and the download's size (0 until it's known).
+pub type Progress = Arc<(AtomicUsize, AtomicUsize)>;
+
+/// `(downloaded, size)`, for the dialog.
+pub fn progress(p: &Progress) -> (usize, usize) {
+    (p.0.load(Relaxed), p.1.load(Relaxed))
 }
 
-/// curl and tar come with Linux and with Windows 10 and later; tar reads both the .tar.gz and the .zip.
-fn swap(exe: &Path, tmp: &Path, asset: &str) -> Result<(), String> {
-    let archive = tmp.join(asset);
-    run(Command::new(tool("curl")).arg("-fsSL").arg(format!("https://github.com/{REPO}/releases/latest/download/{asset}")).arg("-o").arg(&archive))?;
-    run(Command::new(tool("tar")).arg("-xf").arg(&archive).arg("-C").arg(tmp))?;
+/// Downloads (on `rt`) and installs release `tag` on its own thread; the result says why it failed. The Mac runs
+/// install.sh as tagged with `tag`, not as it is on main, so a later edit there can't break this update.
+pub fn install(tag: &str, rt: tokio::runtime::Handle) -> (JoinHandle<Result<(), String>>, Progress) {
+    let (tag, got) = (tag.to_string(), Progress::default());
+    let seen = got.clone();
+    let thread = std::thread::spawn(move || {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let asset = if cfg!(target_os = "macos") { "Resona-macos.zip" } else if cfg!(windows) { "resona-windows-x86_64.zip" } else { "resona-linux-x86_64.tar.gz" };
+        // Linux and Windows unpack beside the binary, so the swap is a rename on one disk. Named per process, so
+        // two copies updating at once don't delete each other's download.
+        let dir = format!(".resona-update-{}", std::process::id());
+        let tmp = if cfg!(target_os = "macos") { std::env::temp_dir().join(dir) } else { exe.with_file_name(dir) };
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let archive = tmp.join(asset);
+        let done = rt.block_on(download(&format!("https://github.com/{REPO}/releases/download/{tag}/{asset}"), &archive, &got)).and_then(|()| {
+            if !cfg!(target_os = "macos") { return swap(&exe, &tmp, &archive) }
+            // The URL goes in as $0, not into the script: a tag can hold characters the shell would read.
+            // install.sh installs the zip in RESONA_ZIP instead of downloading its own.
+            let url = format!("https://raw.githubusercontent.com/{REPO}/{tag}/install.sh");
+            let script = "f=$(mktemp) && curl -fsSL \"$0\" -o \"$f\" && sh \"$f\"; s=$?; rm -f \"$f\"; exit $s";
+            run(Command::new("sh").args(["-c", script, &url]).env("RESONA_ZIP", &archive))
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+        done
+    });
+    (thread, seen)
+}
+
+/// `url` into the file `to`, counting into `got` as it comes.
+async fn download(url: &str, to: &Path, got: &Progress) -> Result<(), String> {
+    // No limit on the whole (a slow line takes a while), but 30 s without a byte fails it instead of hanging.
+    let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let mut r = http.get(url).header("user-agent", "resona").send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
+    got.1.store(r.content_length().unwrap_or(0) as usize, Relaxed);
+    let mut file = std::fs::File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    while let Some(bytes) = r.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        got.0.fetch_add(bytes.len(), Relaxed);
+    }
+    // Known now even when the server didn't say, so the dialog moves on to "Installing".
+    got.1.store(got.0.load(Relaxed), Relaxed);
+    Ok(())
+}
+
+/// tar comes with Linux and with Windows 10 and later, and reads both the .tar.gz and the .zip.
+fn swap(exe: &Path, tmp: &Path, archive: &Path) -> Result<(), String> {
+    run(Command::new(tool("tar")).arg("-xf").arg(archive).arg("-C").arg(tmp))?;
     let new: PathBuf = tmp.join(exe.file_name().unwrap_or_default());
     // A running binary can be renamed, not overwritten (Windows), so the old one steps aside first.
     if cfg!(windows) { std::fs::rename(exe, exe.with_extension("old")).map_err(|e| e.to_string())?; }
@@ -104,4 +137,16 @@ pub fn reopen() {
     } else {
         Command::new("sh").args(["-c", &format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec \"$0\"")]).arg(&exe).spawn()
     };
+}
+
+#[test]
+#[ignore = "downloads a release from GitHub"]
+fn download_counts_every_byte() {
+    let to = std::env::temp_dir().join("resona-download-test.zip");
+    let got = Progress::default();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(download(&format!("https://github.com/{REPO}/releases/download/v0.3.1/Resona-macos.zip"), &to, &got)).unwrap();
+    let size = std::fs::metadata(&to).unwrap().len() as usize;
+    let _ = std::fs::remove_file(&to);
+    assert!(size > 0 && got.0.load(Relaxed) == size && got.1.load(Relaxed) == size);
 }
