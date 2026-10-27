@@ -1448,7 +1448,9 @@ pub fn action_button(ui: &mut egui::Ui, text: &str, primary: bool) -> Response {
     let text = if s == Skin::Ascii { format!("[ {} ]", text.trim_start_matches("▶ ")) } else { text.to_string() };
     // PLACEHOLDER: the colour is picked below, per skin and state.
     let g = ui.painter().layout_no_wrap(text, font, Color32::PLACEHOLDER);
-    let (rect, r) = ui.allocate_exact_size(g.size() + vec2(28.0, 12.0), Sense::click());
+    // ASCII's brackets are the frame: no side padding unless the button is filled, so it lines up with the text.
+    let side = if s == Skin::Ascii && !(primary && fills(p, s)) { 0.0 } else { 28.0 };
+    let (rect, r) = ui.allocate_exact_size(g.size() + vec2(side, 12.0), Sense::click());
     let hover = r.hovered();
     let painter = ui.painter();
     let ink = match s {

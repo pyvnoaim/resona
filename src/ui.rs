@@ -1017,7 +1017,9 @@ impl App {
                         Source::NewReleases => Stamp::New,
                         _ => Stamp::Text(&initials),
                     };
-                    skin::cover(ui, img.as_deref(), l.header_cover, stamp, true);
+                    // Artist pages carry three more lines (stats, popularity, shows): a bigger cover keeps up with them.
+                    let size = if matches!(view, Source::Artist { .. }) { (l.header_cover * 1.35).round() } else { l.header_cover };
+                    skin::cover(ui, img.as_deref(), size, stamp, true);
                     ui.add_space(24.0);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
@@ -1095,8 +1097,14 @@ impl App {
                                 let line = stats.map_or(String::new(), |t| format!("{t} · ")) + &format!("popularity {}", a.popularity);
                                 ui.label(RichText::new(line).font(small(sk)).color(p.dim));
                             } else {
-                                if let Some(t) = stats { ui.label(RichText::new(skin::plain(sk, &t.to_uppercase())).font(small(sk)).color(p.dim)); }
+                                // Popularity joins the stats line when it all fits, so the text column stays near the cover's height.
+                                let stats = stats.map(|t| skin::plain(sk, &format!("{} ·", t.to_uppercase())));
+                                let wide = |t: &str| ui.painter().layout_no_wrap(t.into(), small(sk), p.dim).size().x;
+                                let pop_w = wide("POPULARITY") + 120.0 + wide(&a.popularity.to_string()) + 3.0 * ui.spacing().item_spacing.x;
+                                let one = stats.as_ref().is_some_and(|t| wide(t) + pop_w <= ui.available_width());
+                                if let Some(t) = stats.as_ref().filter(|_| !one) { ui.label(RichText::new(t.trim_end_matches([' ', '-', '·'])).font(small(sk)).color(p.dim)); }
                                 ui.horizontal(|ui| {
+                                    if let Some(t) = stats.filter(|_| one) { ui.label(RichText::new(t).font(small(sk)).color(p.dim)); }
                                     ui.label(RichText::new("POPULARITY").font(small(sk)).color(p.dim));
                                     skin::progress(ui, 120.0, a.popularity as usize, Some(100));
                                     ui.label(RichText::new(a.popularity.to_string()).font(small(sk)).color(p.dim));
