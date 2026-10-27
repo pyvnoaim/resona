@@ -78,7 +78,8 @@ font's default instance.
   loader hands songs to `State::add_tracks`, which numbers and sorts them. Lists without dates ignore the sort.
 - **Refused songs:** librespot reports `Unavailable` for failed *preloads* too; only a failure of the playing track
   counts, and any failed load (a lost audio key, a CDN hiccup) comes that way too, so `api::refused` asks the
-  metadata first: only a song with no files and no stand-in is marked; a passing failure gets one more try.
+  metadata first: only a song with no files and no stand-in is marked; a passing failure gets one more try, and a
+  second failure stops with a note instead of skipping on (Spotify withholding audio keys would fail every song).
   Refused songs are skipped in the direction you were going and faded in lists; clicking one retries it.
 - **One way to drive playback:** buttons, media keys, the menu bar and the keyboard all call `command()` (the CLI too).
   The menu bar owns the ⌘ shortcuts (`keys()` skips them when the menu exists, or they'd fire twice). Plain-key

@@ -197,6 +197,15 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
                     s.play_at(&player, from);
                     ctx.request_repaint();
                     continue;
+                } else {
+                    // Twice, yet its metadata says it plays: most likely Spotify withholding audio keys (in bursts
+                    // on some accounts, on every song on some newer ones: librespot #1649). Skipping on would only
+                    // ask for more keys and fail the whole queue silently: stop and say so.
+                    retried = None; // pressing play again gets its second try again
+                    (s.pos_ms, s.since) = (0, None);
+                    s.error = Some("Spotify won't send this song right now (likely its audio-key limit); try again in a while".into());
+                    ctx.request_repaint();
+                    continue;
                 }
                 // Keep going the way we were going, so "back" doesn't bounce off it forever.
                 if !s.step(&player, from, dir) { (s.pos_ms, s.since) = (0, None) }
