@@ -30,6 +30,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFDate"] }
 
 # Media keys on Linux go over D-Bus (MPRIS); zbus is pure Rust, so no libdbus to install.
+# The terminal player's hangup watcher (`cli::quit_on_hangup`); already in the tree through tokio and crossterm.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 

@@ -15,7 +15,7 @@ use eframe::egui;
 use librespot::playback::mixer::Mixer;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{add_to, api, ask_members, command, controls::*, engine::*, fetch_lyrics, new_playlist, open_list, settings::*, state::*, toggle_like, ui::{album_of, artist_of, own_lists, short_err}};
+use crate::{add_to, api, ask_members, command, controls::*, engine::*, fetch_lyrics, new_playlist, open_list, settings::*, state::*, toggle_like, ui::{album_of, artist_of, day_label, own_lists, short_err}};
 
 type C = (u8, u8, u8);
 const BG: C = (0x1a, 0x1d, 0x23);
@@ -61,12 +61,16 @@ const KEYS: &[(&str, &str)] = &[
     ("p", "add to"), ("v", "lyrics"), ("?", "all keys"),
 ];
 
+/// The board's hint line: the keys for the pane the cursor is in.
+const LIST_KEYS: &[(&str, &str)] = &[("↑↓", "move"), ("enter", "open"), ("tab", "songs"), ("/", "search"), ("q", "quit")];
+const SONG_KEYS: &[(&str, &str)] = &[("enter", "play"), ("a", "queue"), ("l", "like"), ("g", "artist"), ("i", "radio"), ("v", "lyrics")];
+
 /// `?`: every key, in groups.
 const ALL_KEYS: &[(&str, &[(&str, &str)])] = &[
     ("move", &[("↑↓ j k", "move"), ("pgup pgdn", "a page"), ("home end", "top, bottom"), ("tab", "library / songs"), ("enter", "open / play"), ("/", "search"), (".", "the playing song")]),
     ("play", &[("space", "pause / play"), ("n b", "next / back"), ("← →", "seek 10 s"), ("+ -", "volume"), ("m", "mute"), ("s", "shuffle"), ("r", "repeat")]),
     ("song", &[("l", "like"), ("a", "queue"), ("A", "play next"), ("i", "song radio"), ("g", "artist"), ("G", "album"), ("p", "add to playlist"), ("c", "copy link")]),
-    ("view", &[("v", "lyrics"), ("f", "artists, fans, shows"), ("o", "sort"), ("t", "card / board"), ("?", "these keys"), ("^L", "redraw"), ("q", "quit")]),
+    ("view", &[("v", "lyrics"), ("z", "now playing"), ("f", "artists, fans, shows"), ("o", "sort"), ("t", "card / board"), ("?", "these keys"), ("^L", "redraw"), ("q", "quit")]),
 ];
 
 /// `t` switches: a centred card of titled boxes on the terminal's own background (like flow), or a full-width
@@ -113,7 +117,16 @@ struct Tui {
     all_keys: bool,
     /// `f`: the songs box lists a search's artists, albums or playlists, or an artist's fans-also-like or shows.
     cards: Option<Cards>,
+    /// `z`: the playing song full-screen: its cover, the lyrics and what's next.
+    focus: bool,
+    /// The playing song's cover (`want_cover`).
+    cover: Arc<std::sync::Mutex<Cover>>,
 }
+
+/// The playing song's cover: its URL, the picture once downloaded (`busy` while that runs), and its half-block rows
+/// as last drawn, with their size, so a frame doesn't make them again.
+#[derive(Default)]
+struct Cover { url: String, img: Option<Arc<image::RgbImage>>, busy: bool, drawn: Option<((usize, usize), Vec<String>)> }
 
 /// `f`: which list shows instead of the songs, and the cursor in it.
 struct Cards { kind: Kind, row: usize, top: usize }
@@ -192,10 +205,12 @@ pub fn run() {
 
     let mut ui = Tui {
         pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, repaint: false, born: Instant::now(), muted: None, side_src: None,
-        me: String::new(), lyrics: false, next_row: 0, lyr_top: 0, picker: None, all_keys: false, cards: None,
+        me: String::new(), lyrics: false, next_row: 0, lyr_top: 0, picker: None, all_keys: false, cards: None, focus: false, cover: Default::default(),
         style: if setting("cli_style").as_deref() == Some("board") { Style::Board } else { Style::Card },
         volume: setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7),
     };
+    #[cfg(unix)]
+    quit_on_hangup();
     let mut restored = false;
     // Media keys and Now Playing / MPRIS, as in the window. The events are looked for in the wait below.
     let mut media = media_controls(|| {});
@@ -217,17 +232,22 @@ pub fn run() {
             let mut s = state.lock().unwrap();
             // The queue view is drawn straight from the play queue: the playing song, then what's next.
             s.sync_queue_view();
-            if ui.lyrics && let Some(e) = slot.get() { fetch_lyrics(rt.handle(), e, &state, &mut s) }
+            if let Some(e) = slot.get() {
+                if ui.lyrics || ui.focus { fetch_lyrics(rt.handle(), e, &state, &mut s) }
+                ui.want_cover(rt.handle(), e, &s);
+            }
         }
         let lines = ui.draw(&state.lock().unwrap(), w as usize, h as usize, slot.get().is_none());
         let update = paint(&shown, &lines);
-        if !update.is_empty() { let _ = out.write_all(update.as_bytes()).and_then(|_| out.flush()); }
+        // A failed write or read means the terminal is gone (its tab closed, with hangups ignored): quit, or the
+        // music would play on with no way to stop it.
+        if !update.is_empty() && out.write_all(update.as_bytes()).and_then(|_| out.flush()).is_err() { break }
         shown = lines;
         // Idle costs nothing: the clock only ticks while something moves.
         // The splash at ~12 fps; spinners and the clock at 4.
         let tick = {
             let s = state.lock().unwrap();
-            if slot.get().is_none() && s.error.is_none() { 80 } else if s.loading || s.since.is_some() { 250 } else { 2000 }
+            if slot.get().is_none() && s.error.is_none() { 80 } else if s.loading || s.since.is_some() || ui.cover.lock().unwrap().busy { 250 } else { 2000 }
         };
         if let Some((controls, _)) = &mut media { media_show(controls, &state.lock().unwrap(), &mut media_sent) }
         // Wait for the tick or a key, looking for media keys between short naps.
@@ -241,10 +261,18 @@ pub fn run() {
                 break None;
             }
             let left = until.saturating_duration_since(Instant::now());
-            if event::poll(if media.is_some() { left.min(Duration::from_millis(100)) } else { left }).unwrap_or(false) { break event::read().ok() }
+            match event::poll(if media.is_some() { left.min(Duration::from_millis(100)) } else { left }) {
+                Ok(true) => break Some(event::read()),
+                Ok(false) => {}
+                Err(e) => break Some(Err(e)),
+            }
             if Instant::now() >= until { break None }
         };
-        let Some(Event::Key(k)) = key else { continue }; // a resize or a media key just redraws
+        let k = match key {
+            Some(Ok(Event::Key(k))) => k,
+            Some(Err(_)) => break, // the terminal is gone
+            _ => continue, // a resize or a media key just redraws
+        };
         if k.kind == KeyEventKind::Press && !ui.key(k, slot.get(), &state, rt.handle(), &ctx) { break }
     }
 }
@@ -276,6 +304,15 @@ impl Tui {
         let Some(e) = e else { return true };
         // The lyrics cover the song list: its movement keys and Enter go to the lyrics, never to the hidden list.
         let moves = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Enter);
+        // The now-playing view has nothing to move through; Esc (or z) goes back to the lists.
+        if self.focus && (moves || k.code == KeyCode::Esc) {
+            match k.code {
+                KeyCode::Esc => self.focus = false,
+                KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') => self.lyrics_key(k, e, state), // plain lyrics scroll
+                _ => {}
+            }
+            return true;
+        }
         if k.code == KeyCode::Char('f') {
             // The next list this page has, then back to the songs.
             let kinds = kinds(&state.lock().unwrap());
@@ -286,7 +323,7 @@ impl Tui {
         }
         if self.cards.is_some() && self.pane == Pane::Songs && (moves || k.code == KeyCode::Esc) { self.cards_key(k, e, state, rt, ctx); return true }
         // Like the lyrics, the cards cover the songs: song keys act on the playing one.
-        let covered = self.lyrics || self.cards.is_some();
+        let covered = self.lyrics || self.cards.is_some() || self.focus;
         if self.lyrics && self.pane == Pane::Songs && moves { self.lyrics_key(k, e, state); return true }
         let (lists, rows) = { let s = state.lock().unwrap(); (lists_of(&s).len(), s.tracks.len()) };
         let page = self.body_h.max(1);
@@ -352,7 +389,7 @@ impl Tui {
                 e.mixer.set_volume((self.volume * u16::MAX as f32) as u16);
             }
             KeyCode::Char('r') => state.lock().unwrap().cycle_repeat(),
-            KeyCode::Char('/') => self.search = Some(String::new()),
+            KeyCode::Char('/') => (self.search, self.focus) = (Some(String::new()), false), // typed where it shows
             KeyCode::Char('l') => if let Some(id) = pick.and_then(|t| t.id) { toggle_like(rt, e, state, id) },
             // a: to the end of the queue, A: right after this song.
             KeyCode::Char(c @ ('a' | 'A')) if pane == Pane::Songs && !covered => if let Some(t) = pick {
@@ -374,6 +411,7 @@ impl Tui {
                 (self.jump, self.pane) = (id, Pane::Songs);
             }
             KeyCode::Char('?') => self.all_keys = true,
+            KeyCode::Char('z') => (self.focus, self.lyr_top) = (!self.focus, 0),
             KeyCode::Char('v') => (self.lyrics, self.next_row, self.lyr_top) = (!self.lyrics, 0, 0),
             KeyCode::Char('p') => if let Some(t) = pick.filter(|t| t.id.is_some()) {
                 ask_members(rt, e, state); // the √ marks: what's in your playlists, read once
@@ -491,7 +529,7 @@ impl Tui {
                 for column in &columns {
                     match column.get(r) {
                         Some((g, "")) => { row.col(g, red(), col_w); }
-                        Some((k, l)) => { row.col(&format!("  {k}"), FG, 13).col(l, DIM, col_w - 13); }
+                        Some((k, l)) => { row.col(&format!("  {k}"), FG, 15).col(l, DIM, col_w - 15); }
                         None => { row.pad(col_w); }
                     }
                 }
@@ -543,8 +581,8 @@ impl Tui {
         let pos = s.position();
         let next_row = |row: &mut Seg, k: usize, (_, t): &(usize, &api::Track), lit: bool| {
             let when = match k { 0 => format!("IN {}", clock(now.duration_ms.saturating_sub(pos))), 1 => "THEN".into(), _ => String::new() };
-            let rest = w.saturating_sub(9 + 6);
-            row.col(&when, if lit { FG } else { DIM }, 9).col(&t.name, FG, rest * 3 / 5).col(&t.artist_line(), if lit { DIM } else { SUB }, rest - rest * 3 / 5).right(&[(clock(t.duration_ms), DIM)], 0);
+            let rest = w.saturating_sub(11 + 6);
+            row.col(&when, if lit { FG } else { DIM }, 11).col(&t.name, FG, rest * 3 / 5).col(&t.artist_line(), if lit { DIM } else { SUB }, rest - rest * 3 / 5).right(&[(clock(t.duration_ms), DIM)], 0);
         };
         let mut rows: Vec<String> = Vec::with_capacity(h);
         let (title, kind) = (format!("lyrics · {}", now.name), match lyrics {
@@ -632,6 +670,7 @@ impl Tui {
         self.row = self.row.min(s.tracks.len().saturating_sub(1));
         // The library is as wide as its longest name, within reason.
         let longest = lists.iter().map(|(_, n)| n.width()).max().unwrap_or(0);
+        if self.focus && !self.all_keys && self.picker.is_none() { return self.now_view(s, w, h) }
         match self.style {
             Style::Card => self.card(s, &lists, longest, w, h),
             Style::Board => self.board(s, &lists, longest, w, h),
@@ -683,6 +722,7 @@ impl Tui {
         let lw = (longest + 4).clamp(22, (cw / 3).max(22));
         let rw = cw - lw - 1;
         let instead = self.instead(s, rw - 4, body_h, None);
+        let shown = self.song_lines(s, body_h);
         let edge = |pane| if self.pane == pane { red() } else { FAINT };
         let songs_edge = if self.picker.is_some() || self.all_keys { red() } else { edge(Pane::Songs) };
         let (head, count) = match &instead { Some((t, c, _)) => (t.clone(), c.clone()), None => (title(s, lists), count(s, self.spin())) };
@@ -690,7 +730,6 @@ impl Tui {
             top(lw, edge(Pane::Lists), &[("library".into(), FG)], &[(lists.len().to_string(), DIM)]),
             top(rw, songs_edge, &[(head, FG)], &[(count, DIM)]))));
         scroll(&mut self.side_top, self.side, body_h);
-        scroll(&mut self.row_top, self.row, body_h);
         let cursor_bg = |on: bool, pane| if !on { None } else if self.pane == pane { Some(cursor()) } else { Some(dull()) };
         for i in 0..body_h {
             let mut left = Seg::new(lw - 4, None);
@@ -700,14 +739,16 @@ impl Tui {
                 left = Seg::new(lw - 4, cursor_bg(sel, Pane::Lists));
                 left.put(name, if open { red() } else if sel { FG } else { DIM });
             }
-            let at = self.row_top + i;
-            let mut right = Seg::new(rw - 4, None);
-            if at < s.tracks.len() {
-                right = song_row(s, at, rw - 4, false, cursor_bg(at == self.row, Pane::Songs), at == self.row);
-            } else if i == 0 && s.tracks.is_empty() {
-                right.put(if s.loading { self.spin() } else if s.view.is_none() { "…" } else { "nothing here" }, GUTTER);
-            }
-            let right = match &instead { Some((_, _, rows)) => rows[i].clone(), None => right.done() };
+            let right = match (&instead, shown.get(i)) {
+                (Some((_, _, rows)), _) => rows[i].clone(),
+                (None, Some(&Line::Song(at))) => song_row(s, at, rw - 4, false, cursor_bg(at == self.row, Pane::Songs), at == self.row).done(),
+                (None, Some(&Line::Day(ms))) => day_row(ms, rw - 4, 0, None),
+                (None, None) => {
+                    let mut right = Seg::new(rw - 4, None);
+                    if i == 0 && s.tracks.is_empty() { right.put(if s.loading { self.spin() } else if s.view.is_none() { "…" } else { "nothing here" }, GUTTER); }
+                    right.done()
+                }
+            };
             lines.push(line(format!("{} {}", side(edge(Pane::Lists), left.done()), side(songs_edge, right))));
         }
         lines.push(line(format!("{} {}", bottom(lw, edge(Pane::Lists)), bottom(rw, songs_edge))));
@@ -720,8 +761,7 @@ impl Tui {
             (Some(_), false) => "‖ paused",
         };
         lines.push(line(top(cw, SUB, &[(state_word.into(), FG)], &[(format!("vol {:.0}%", self.volume * 100.0), DIM)])));
-        let flags: Vec<&str> = [(s.shuffle, "shuffle"), (s.repeat == Repeat::All, "repeat"), (s.repeat == Repeat::One, "repeat one")]
-            .into_iter().filter(|(on, _)| *on).map(|(_, l)| l).collect();
+        let flags: Vec<&str> = flags(s).collect();
         let mut song = Seg::new(cw - 4, None);
         let mut bar = Seg::new(cw - 4, None);
         match &s.now {
@@ -764,7 +804,7 @@ impl Tui {
         let mut lines = Vec::with_capacity(h);
         let inner = w - 4;
         // The body's sizes, needed first: the header names what the songs box shows.
-        let (body_h, lw) = (h - 6, (longest + 2).clamp(18, ((w - 4) / 3).max(18)));
+        let (body_h, lw) = (h - 8, (longest + 2).clamp(18, ((w - 4) / 3).max(18)));
         let instead = self.instead(s, w - 4 - lw - 3 - 2, body_h, Some(BG));
         let rule = || Seg::new(w, Some(BG)).pad(2).put(&"─".repeat(inner), RULE).done();
 
@@ -785,72 +825,291 @@ impl Tui {
         lines.push(head.right(&status, 2).done());
         lines.push(rule());
 
-        // Body: lists on the left, songs on the right. The bar only marks what's open and what's playing.
-        self.body_h = body_h;
+        // Body: lists on the left under their two headings, songs on the right under their column heads.
+        // The bar only marks what's open and what's playing.
+        enum Side { Head(&'static str, String), Gap, List(usize) }
+        let lib = lists.iter().take_while(|(src, _)| !matches!(src, Source::Playlist(_))).count();
+        let mut side = vec![Side::Head("library", String::new())];
+        side.extend((0..lib).map(Side::List));
+        side.extend([Side::Gap, Side::Head("playlists", (lists.len() - lib).to_string())]);
+        side.extend((lib..lists.len()).map(Side::List));
+        let at = side.iter().position(|l| matches!(l, Side::List(i) if *i == self.side)).unwrap_or(0);
+        if at > 0 && matches!(side[at - 1], Side::Head(..)) { scroll(&mut self.side_top, at - 1, body_h) } // its heading too
+        scroll(&mut self.side_top, at, body_h);
         let rw = inner - lw - 3;
-        scroll(&mut self.side_top, self.side, body_h);
-        scroll(&mut self.row_top, self.row, body_h);
+        let songs_h = if instead.is_some() { body_h } else { body_h - 1 };
+        self.body_h = songs_h;
+        let shown = self.song_lines(s, songs_h);
         let cursor_bg = |on: bool, pane| Some(if !on { BG } else if self.pane == pane { cursor() } else { dull() });
         for i in 0..body_h {
             let mut left = Seg::new(lw, Some(BG));
-            if let Some((src, name)) = lists.get(self.side_top + i) {
-                let open = s.view.as_ref() == Some(src);
-                let sel = self.side_top + i == self.side;
-                left = Seg::new(lw, cursor_bg(sel, Pane::Lists));
-                left.put(if open { "▌ " } else { "  " }, red()).put(name, if open || sel { FG } else { DIM });
+            match side.get(self.side_top + i) {
+                Some(Side::Head(name, n)) => { left.put(&format!("  {name}"), FAINT).right(&[(n.clone(), FAINT)], 1); }
+                Some(&Side::List(j)) => {
+                    let (src, name) = &lists[j];
+                    let open = s.view.as_ref() == Some(src);
+                    left = Seg::new(lw, cursor_bg(j == self.side, Pane::Lists));
+                    left.put(if open { "▌ " } else { "  " }, red()).put(name, if open || j == self.side { FG } else { DIM });
+                }
+                Some(Side::Gap) | None => {}
             }
-            let at = self.row_top + i;
-            let mut right = Seg::new(rw, Some(BG));
-            if at < s.tracks.len() {
-                right = song_row(s, at, rw, true, cursor_bg(at == self.row, Pane::Songs), at == self.row);
-            } else if i == 0 && s.tracks.is_empty() {
-                right.pad(2).put(if s.loading { self.spin() } else if s.view.is_none() { "…" } else { "nothing here" }, FAINT);
-            }
-            let right = match &instead { Some((_, _, rows)) => format!("{}{}", Seg::new(2, Some(BG)).done(), rows[i]), None => right.done() };
+            let right = match (&instead, i.checked_sub(1).map(|i| shown.get(i))) {
+                (Some((_, _, rows)), _) => format!("{}{}", Seg::new(2, Some(BG)).done(), rows[i]),
+                (None, None) => song_head(s, rw),
+                (None, Some(Some(&Line::Song(at)))) => song_row(s, at, rw, true, cursor_bg(at == self.row, Pane::Songs), at == self.row).done(),
+                (None, Some(Some(&Line::Day(ms)))) => day_row(ms, rw, 2, Some(BG)),
+                (None, Some(None)) => {
+                    let mut right = Seg::new(rw, Some(BG));
+                    if i == 1 && s.tracks.is_empty() { right.pad(2).put(if s.loading { self.spin() } else if s.view.is_none() { "…" } else { "nothing here" }, FAINT); }
+                    right.done()
+                }
+            };
             lines.push(format!("{}{}{}{}{}", Seg::new(2, Some(BG)).done(), left.done(), Seg::new(3, Some(BG)).done(), right, Seg::new(2, Some(BG)).done()));
         }
 
-        // Player: the song left, where it is and how it's playing right.
+        // Player, three lines beside the cover: the song and how it's playing, its artists and album, where it is.
         lines.push(rule());
-        let mut right: Vec<(String, C)> = Vec::new();
-        if let Some(t) = &s.now {
-            let (pos, dur) = (s.position(), t.duration_ms.max(1));
-            let bar_w = (inner / 5).clamp(10, 40);
-            let filled = (pos as usize * bar_w / dur as usize).min(bar_w);
-            right.push((format!("{}  ", clock(pos)), DIM));
-            right.push(("━".repeat(filled), red()));
-            right.push(("─".repeat(bar_w - filled), RULE));
-            right.push((format!("  {}", clock(dur)), DIM));
-        }
-        for (on, label) in [(s.shuffle, "shuffle"), (s.repeat == Repeat::All, "repeat"), (s.repeat == Repeat::One, "repeat one")] {
-            if on { right.push((format!("   {label}"), SUB)) }
-        }
-        right.push((format!("   vol {:.0}%", self.volume * 100.0), DIM));
-        let mut player = Seg::new(w, Some(PANEL));
-        player.pad(2);
-        let room = player.room().saturating_sub(width(&right) + 4);
+        let art = match &s.now { Some(_) => self.art(6, 3), None => vec![Seg::new(6, Some(PANEL)).done(); 3] };
+        let player = |k: usize| { let mut p = Seg::new(w, Some(PANEL)); p.pad(2).raw(art[k].clone(), 6).pad(3); p };
+        let mut right: Vec<(String, C)> = flags(s).map(|f| (format!("{f}   "), SUB)).collect();
+        right.push((format!("vol {:.0}%", self.volume * 100.0), DIM));
+        let (mut one, mut two, mut three) = (player(0), player(1), player(2));
         match &s.now {
             Some(t) => {
-                let mut song = Seg::new(room, Some(PANEL));
-                song.put("▌ ", red()).put(if s.since.is_some() { "▶  " } else { "‖  " }, FG).put(&t.name, FG).put("  ", FG).put(&t.artist_line(), SUB);
-                player.raw(song.done(), room);
+                let room = one.room().saturating_sub(width(&right) + 4);
+                one.put(if s.since.is_some() { "▶  " } else { "‖  " }, red()).put_in(&t.name, BRIGHT, room.saturating_sub(3));
+                let album = if t.album.name.is_empty() { String::new() } else { format!("  ·  {}", t.album.name) };
+                two.pad(3).put(&t.artist_line(), SUB).put(&album, FAINT);
+                let mut bar = Seg::new(three.room().saturating_sub(3 + 2), Some(PANEL));
+                progress(&mut bar, s.position(), t.duration_ms);
+                let bar_w = bar.max;
+                three.pad(3).raw(bar.done(), bar_w);
             }
-            None => { player.put("  nothing playing", FAINT); }
+            None => { one.put("nothing playing", FAINT); }
         }
-        lines.push(player.right(&right, 2).done());
+        lines.extend([one.right(&right, 2).done(), two.done(), three.done()]);
 
-        // Keys, or the search being typed.
+        // Keys for the pane the cursor is in, or the search being typed.
         let mut keys = Seg::new(w, Some(BG));
         keys.pad(2);
         match &self.search {
             Some(q) => { keys.put("/ ", red()).put(q, FG).put("▌", red()).put("   enter search   esc cancel", DIM); }
-            None => for (i, (k, label)) in KEYS.iter().enumerate() {
-                keys.put(if i == 0 { "" } else { "   " }, DIM).put(k, FG).put(" ", DIM).put(label, DIM);
-            },
+            None => {
+                let (name, pairs) = if self.pane == Pane::Lists { ("lists  ", LIST_KEYS) } else { ("songs  ", SONG_KEYS) };
+                keys.put(name, FAINT);
+                for (i, (k, label)) in pairs.iter().enumerate() {
+                    keys.put(if i == 0 { "" } else { "   " }, DIM).put(k, FG).put(" ", DIM).put(label, DIM);
+                }
+                // Hard right, the keys that work anywhere; only `?` when the line is short of room.
+                let always: &[(&str, &str)] = &[("space", " pause   "), ("z", " now playing   "), ("?", " all keys")];
+                let always = if keys.room() >= 3 + 40 + 2 { always } else { &always[2..] }; // gap, the keys, margin
+                keys.pad(3).right(&always.iter().flat_map(|(k, l)| [(k.to_string(), FG), (l.to_string(), DIM)]).collect::<Vec<_>>(), 2);
+            }
         }
         lines.push(keys.done());
         lines
     }
+
+    /// `z`: the playing song large. Its cover in half-blocks on the left; on the right the song, where it is, the
+    /// lyrics (the current line a third of the way down) and the next two songs.
+    fn now_view(&mut self, s: &State, w: usize, h: usize) -> Vec<String> {
+        let bg = if self.style == Style::Board { Some(BG) } else { None };
+        let blank = || Seg::new(w, bg).done();
+        let mut lines = vec![blank()];
+        let Some(now) = &s.now else {
+            lines.resize_with(h / 2, blank);
+            lines.push(center(&[("nothing playing · z goes back".into(), DIM)], w, bg));
+            lines.resize_with(h, blank);
+            return lines;
+        };
+        // Cells are about twice as tall as wide: a square cover is twice as many columns as rows.
+        let rows = (h - 4).min(w / 5);
+        let (x, cols) = (4, rows * 2);
+        let rw = w - x - cols - 5 - 4;
+        let art = self.art(cols, rows);
+        let line = || Seg::new(rw, bg);
+        let mut right: Vec<String> = Vec::with_capacity(rows);
+        right.push(line().put("now playing", FAINT).done());
+        right.push(line().done());
+        right.push(line().put(&now.name, BRIGHT).done());
+        right.push(line().put(&now.artist_line(), SUB).done());
+        right.push(line().put(&now.album.name, FAINT).done());
+        right.push(line().done());
+        let pos = s.position();
+        let mut bar = line();
+        progress(&mut bar, pos, now.duration_ms);
+        right.push(bar.done());
+        let mut state: Vec<(String, C)> = vec![(if s.since.is_some() { "▶ playing" } else { "‖ paused" }.into(), FG)];
+        state.extend(flags(s).map(|f| (format!("   {f}"), SUB)));
+        let liked = now.id.as_ref().is_some_and(|id| s.liked.contains(id));
+        let mut st = line();
+        for (t, c) in &state { st.put(t, *c); }
+        right.push(st.right(&[(if liked { "♥   " } else { "" }.into(), red()), (format!("vol {:.0}%", self.volume * 100.0), DIM)], 0).done());
+        right.push(line().done());
+
+        // The lyrics fill what's left over up next (four lines: a gap, its heading, two songs), when there's room.
+        let next = s.up_next(2);
+        let tail = if rows >= right.len() + 8 && !next.is_empty() { 3 + next.len() } else { 0 };
+        let room = rows.saturating_sub(right.len() + tail);
+        let lyrics = s.lyrics.as_ref().filter(|(id, _)| now.id.as_ref() == Some(id)).map(|(_, l)| l);
+        match lyrics {
+            Some(Lyrics::Lines { synced, lines: words }) => {
+                let cur = if *synced { words.iter().rposition(|(at, _)| *at <= pos) } else { None };
+                let first = match cur { Some(c) => c.saturating_sub(room / 3), None => self.lyr_top.min(words.len().saturating_sub(1)) };
+                for (i, (_, text)) in words.iter().enumerate().skip(first).take(room) {
+                    let (mark, color) = match cur { Some(c) if i == c => ("▌ ", BRIGHT), Some(c) if i < c => ("  ", FAINT), Some(_) => ("  ", DIM), None => ("  ", FG) };
+                    right.push(line().put(mark, red()).put(text, color).done());
+                }
+            }
+            Some(Lyrics::Missing) => right.push(line().put("no lyrics", FAINT).done()),
+            _ => right.push(line().put(&format!("{} lyrics", self.spin()), FAINT).done()),
+        }
+        if tail > 0 {
+            right.resize_with(rows - tail, || line().done());
+            right.push(line().done());
+            right.push(line().put("up next", FAINT).done());
+            for (_, t) in &next {
+                let mut row = line();
+                let artist = format!("  {}", t.artist_line());
+                let room = row.room().saturating_sub(6);
+                row.put_in(&t.name, FG, room);
+                let room = room.saturating_sub(row.used);
+                right.push(row.put_in(&artist, SUB, room).right(&[(clock(t.duration_ms), DIM)], 0).done());
+            }
+        }
+        right.resize_with(rows, || line().done());
+        for (cover, words) in art.into_iter().zip(right) {
+            lines.push(Seg::new(w, bg).pad(x).raw(cover, cols).pad(5).raw(words, rw).done());
+        }
+        lines.resize_with(h - 2, blank);
+        // Notes and errors, as the lists' header would show them, over the keys.
+        let note = match (&s.error, s.notice()) {
+            (Some(err), _) => Some((short_err(err), red())),
+            (None, Some(n)) => Some((n.text.clone(), if n.error { red() } else { SUB })),
+            _ => None,
+        };
+        if let Some((text, c)) = note { lines[h - 3] = Seg::new(w, bg).pad(x).put(&text, c).done() }
+        let mut keys = Seg::new(w, bg);
+        keys.pad(x);
+        for (i, (k, label)) in [("space", "pause"), ("n b", "next / back"), ("←→", "seek"), ("l", "like"), ("z", "back to the lists")].iter().enumerate() {
+            keys.put(if i == 0 { "" } else { "   " }, DIM).put(k, FG).put(" ", DIM).put(label, DIM);
+        }
+        lines.extend([keys.done(), blank()]);
+        lines
+    }
+
+    /// The songs box's `h` lines from `row_top`, scrolled so the cursor's song (and a day divider right over it) shows.
+    fn song_lines(&mut self, s: &State, h: usize) -> Vec<Line> {
+        let lines = lines_of(s);
+        let at = lines.iter().position(|&l| l == Line::Song(self.row)).unwrap_or(0);
+        if at > 0 && matches!(lines[at - 1], Line::Day(_)) { scroll(&mut self.row_top, at - 1, h) }
+        scroll(&mut self.row_top, at, h);
+        lines.into_iter().skip(self.row_top).take(h).collect()
+    }
+
+    /// Downloads the playing song's cover once it changes, for the board's player and `z` (the card shows none).
+    fn want_cover(&self, rt: &tokio::runtime::Handle, e: &Engine, s: &State) {
+        if self.style == Style::Card && !self.focus { return }
+        let url = s.now.as_ref().and_then(|t| t.album.images.first()).map_or(String::new(), |i| i.url.clone());
+        let mut cover = self.cover.lock().unwrap();
+        if cover.url == url { return }
+        *cover = Cover { url: url.clone(), busy: !url.is_empty(), ..Default::default() }; // no art: the plain block
+        if url.is_empty() { return }
+        let (slot, http) = (self.cover.clone(), e.http.clone());
+        // ponytail: a failed download leaves the plain block until the next song; retry if that shows up.
+        rt.spawn(async move {
+            let bytes = async { http.get(&url).send().await.ok()?.bytes().await.ok() }.await;
+            let img = bytes.and_then(|b| image::load_from_memory(&b).ok()).map(|i| Arc::new(i.thumbnail(160, 160).to_rgb8()));
+            let mut cover = slot.lock().unwrap();
+            if cover.url == url { (cover.img, cover.busy) = (img, false) } // still the playing song's
+        });
+    }
+
+    /// The cover in `cols` × `rows` half-blocks, made once per cover and size.
+    fn art(&self, cols: usize, rows: usize) -> Vec<String> {
+        let mut cover = self.cover.lock().unwrap();
+        if let Some((size, art)) = &cover.drawn && *size == (cols, rows) { return art.clone() }
+        let art = half_blocks(cover.img.as_deref(), cols, rows);
+        if cover.img.is_some() { cover.drawn = Some(((cols, rows), art.clone())) }
+        art
+    }
+}
+
+/// A line of the songs box: a song, or (New releases, sorted by date) a divider where the release day changes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Line { Song(usize), Day(i64) }
+
+fn lines_of(s: &State) -> Vec<Line> {
+    let dated = s.dated();
+    let mut out = Vec::with_capacity(s.tracks.len());
+    for (i, t) in s.tracks.iter().enumerate() {
+        if dated && (i == 0 || s.tracks[i - 1].added != t.added) { out.push(Line::Day(t.added)) }
+        out.push(Line::Song(i));
+    }
+    out
+}
+
+/// `0:42 ━━━━━━──────── 2:19`, filling the rest of `seg`.
+fn progress(seg: &mut Seg, pos: u32, dur: u32) {
+    let (a, b) = (clock(pos), clock(dur));
+    let bar_w = seg.room().saturating_sub(a.len() + b.len() + 2);
+    let filled = (pos as usize * bar_w / dur.max(1) as usize).min(bar_w);
+    seg.put(&a, DIM).put(" ", DIM).put(&"━".repeat(filled), red()).put(&"─".repeat(bar_w - filled), RULE).put(" ", DIM).put(&b, DIM);
+}
+
+/// The play modes that are on.
+fn flags(s: &State) -> impl Iterator<Item = &'static str> {
+    [(s.shuffle, "shuffle"), (s.repeat == Repeat::All, "repeat"), (s.repeat == Repeat::One, "repeat one")].into_iter().filter(|(on, _)| *on).map(|(_, l)| l)
+}
+
+/// `── fri 30 oct ─────`, `indent` in, `w` wide.
+fn day_row(ms: i64, w: usize, indent: usize, bg: Option<C>) -> String {
+    let mut row = Seg::new(w, bg);
+    row.pad(indent).put(&format!("── {} ", day_label(ms).to_lowercase()), SUB);
+    let n = row.room();
+    row.put(&"─".repeat(n), RULE).done()
+}
+
+/// The picture in `cols` × `rows` cells, two pixels to a cell: ▀ in the top pixel's colour over the bottom one's.
+/// A plain block until it's downloaded.
+fn half_blocks(img: Option<&image::RgbImage>, cols: usize, rows: usize) -> Vec<String> {
+    let Some(img) = img else { return vec![Seg::new(cols, Some(RULE)).done(); rows] };
+    let img = image::imageops::resize(img, cols as u32, rows as u32 * 2, image::imageops::FilterType::Triangle);
+    (0..rows as u32).map(|y| (0..cols as u32).map(|x| {
+        let (a, b) = (img.get_pixel(x, 2 * y), img.get_pixel(x, 2 * y + 1));
+        format!("\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m▀", a[0], a[1], a[2], b[0], b[1], b[2])
+    }).collect()).collect()
+}
+
+#[test]
+fn release_days_divide_new_releases_and_covers_take_two_pixels_a_cell() {
+    let mut s = State::default();
+    s.view = Some(Source::NewReleases);
+    s.tracks = [5, 5, 3].iter().map(|&added| api::Track { added, ..Default::default() }).collect();
+    assert_eq!(lines_of(&s), [Line::Day(5), Line::Song(0), Line::Song(1), Line::Day(3), Line::Song(2)]);
+    s.view = Some(Source::Liked);
+    assert_eq!(lines_of(&s).len(), 3); // other lists have no dividers
+    let img = image::RgbImage::from_fn(1, 2, |_, y| image::Rgb(if y == 0 { [255, 0, 0] } else { [0, 0, 255] }));
+    assert_eq!(half_blocks(Some(&img), 1, 1), ["\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m▀"]);
+}
+
+/// The column heads over the board's songs, lined up with `song_row`.
+fn song_head(s: &State, w: usize) -> String {
+    let (num_w, name_w, artist_w, album_w) = widths(s, w, true);
+    let mut row = Seg::new(w, Some(BG));
+    row.pad(2).col("#", FAINT, num_w + 2).col("title", FAINT, name_w).col("artist", FAINT, artist_w);
+    if album_w > 0 { row.col("album", FAINT, album_w); }
+    row.right(&[("time".into(), FAINT)], 0).done()
+}
+
+/// Number, title, artist and album widths for song rows `w` wide (album 0 when it doesn't fit). Title and artist are
+/// capped, so a wide terminal gets an album column rather than wide gaps.
+fn widths(s: &State, w: usize, bar: bool) -> (usize, usize, usize, usize) {
+    let num_w = s.tracks.len().max(10).to_string().len();
+    let rest = w.saturating_sub(if bar { 2 } else { 0 } + num_w + 2 + 2 + 6);
+    if rest < 90 { return (num_w, rest * 11 / 20, rest - rest * 11 / 20, 0) }
+    let (name, artist) = ((rest * 3 / 8).min(44), (rest * 3 / 10).min(34));
+    (num_w, name, artist, rest - name - artist)
 }
 
 /// One song row, `w` wide, the same in both styles: number (▶ when playing), name, artists, heart, length.
@@ -860,9 +1119,7 @@ fn song_row(s: &State, at: usize, w: usize, bar: bool, bg: Option<C>, sel: bool)
     let playing = t.id.is_some() && t.id == s.now.as_ref().and_then(|n| n.id.clone());
     let gone = t.id.as_ref().is_some_and(|id| s.unplayable.contains(id));
     let liked = t.id.as_ref().is_some_and(|id| s.liked.contains(id));
-    let num_w = s.tracks.len().max(10).to_string().len();
-    let rest = w.saturating_sub(if bar { 2 } else { 0 } + num_w + 2 + 2 + 6);
-    let (name_w, artist_w) = (rest * 11 / 20, rest - rest * 11 / 20);
+    let (num_w, name_w, artist_w, album_w) = widths(s, w, bar);
     // Faded songs and the number column step up a shade on the selected row; red would vanish on it.
     let (faded, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
     let accent = if sel { BRIGHT } else { red() };
@@ -873,6 +1130,7 @@ fn song_row(s: &State, at: usize, w: usize, bar: bool, bg: Option<C>, sel: bool)
     row.col(&format!("{num:>num_w$}"), if playing || hand { accent } else { faded }, num_w + 2)
         .col(&t.name, if playing { accent } else if gone { faded } else { FG }, name_w)
         .col(&t.artist_line(), if gone { faded } else { sub }, artist_w)
+        .col(&t.album.name, if sel { DIM } else { FAINT }, album_w)
         .col(if liked { "♥" } else { "" }, accent, 2)
         .right(&[(clock(t.duration_ms), DIM)], 0);
     row
@@ -971,6 +1229,23 @@ fn lists_of(s: &State) -> Vec<(Source, String)> {
         .collect()
 }
 
+/// A closed terminal tab quits the player, even when the terminal app starts its shells with hangups ignored.
+/// crossterm can't tell: on a terminal that's gone, its read gets 0 bytes or EIO and it loops on waiting for
+/// "would block", so the key wait never returns and the music plays on. The terminal does say POLLHUP.
+// ponytail: looked at twice a second; drop it if crossterm ever returns that error itself.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn quit_on_hangup() {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() { return } // a pipe's end would look the same
+    std::thread::spawn(|| loop {
+        let mut tty = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd, and a zero timeout.
+        if unsafe { libc::poll(&mut tty, 1, 0) } > 0 && tty.revents & libc::POLLHUP != 0 { std::process::exit(0) }
+        std::thread::sleep(Duration::from_millis(500));
+    });
+}
+
 /// macOS delivers media keys on the main run loop, which a terminal program never turns: give it one turn.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
@@ -1067,10 +1342,10 @@ impl Seg {
         self.used += w;
         self
     }
-    /// `text` in exactly `w` cells.
+    /// `text` in exactly `w` cells, the last two kept clear as the gap to the next column.
     fn col(&mut self, text: &str, c: C, w: usize) -> &mut Self {
         let start = self.used;
-        self.put_in(text, c, w);
+        self.put_in(text, c, if w > 2 { w - 2 } else { w });
         self.pad(w - (self.used - start))
     }
     fn pad(&mut self, n: usize) -> &mut Self {
@@ -1142,3 +1417,4 @@ fn fit_cuts_by_cells_and_rows_come_out_exactly_wide() {
     scroll(&mut top, 30, 10);
     assert_eq!(top, 21); // the cursor sits on the last visible row
 }
+

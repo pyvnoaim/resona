@@ -118,7 +118,7 @@ playlists and song radio. Press `?` for every shortcut. Media keys and Control C
 `resona cli` runs the same player full-screen in the terminal: arrows to move, tab to switch between your lists
 and the songs, enter to play, `/` to search, `t` to switch between the two looks, `q` to quit. It does most of
 what the window does: `a` / `A` queue a song or play it next, `p` adds it to a playlist, `v` shows the lyrics,
-`i` starts a song radio, `g` / `G` open the artist / album, `c` copies the link, `m` mutes, and the queue shows in
+`z` the playing song full-screen with its cover and lyrics, `i` starts a song radio, `g` / `G` open the artist / album, `c` copies the link, `m` mutes, and the queue shows in
 the library while it has songs. `f` steps through a search's artists, albums and playlists, or an artist's similar
 artists and shows. Media keys and Now Playing work there too. Press `?` for every key.
 

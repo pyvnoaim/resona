@@ -1280,7 +1280,7 @@ impl App {
                         // Artist pages: the latest songs follow the top songs, under their own heading and numbered afresh.
                         let latest_from = s.artist.as_ref().map(|a| a.top).filter(|&n| n > 0 && n < s.tracks.len());
                         // Only while sorted by date: list order mixes the days.
-                        let dated = view == Source::NewReleases && s.sort.label().is_some();
+                        let dated = s.dated();
                         for i in range {
                             // New releases: a divider with the release day wherever it changes.
                             let day = s.tracks.get(i).map(|t| t.added).filter(|_| dated);

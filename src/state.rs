@@ -326,6 +326,11 @@ impl State {
         self.sort_tracks();
     }
 
+    /// New releases in date order: a divider wherever the release day changes (the window's and the CLI's).
+    pub fn dated(&self) -> bool {
+        self.view == Some(Source::NewReleases) && self.sort.label().is_some()
+    }
+
     /// The sort, named for the song count: only when it does something here (search, albums and artists
     /// have no dates, so every order looks the same).
     pub fn sort_label(&self) -> Option<&'static str> {
