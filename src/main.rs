@@ -798,8 +798,11 @@ fn main() -> eframe::Result {
     // librespot says why a song failed only in its log: `RUST_LOG=warn ./resona 2>resona.log`.
     let log = env_logger::Builder::from_default_env().build();
     log::set_max_level(log.filter());
-    let _ = log::set_boxed_logger(Box::new(Log(log)));
-    if std::env::args().nth(1).as_deref() == Some("cli") {
+    let cli = std::env::args().nth(1).as_deref() == Some("cli");
+    // The CLI draws on the terminal stderr goes to: a log line there scrolls the screen under its line-diff repaint.
+    let quiet = cli && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let _ = log::set_boxed_logger(Box::new(Log(log, quiet)));
+    if cli {
         cli::run();
         return Ok(());
     }
@@ -820,14 +823,14 @@ fn main() -> eframe::Result {
 
 /// env_logger, plus one catch: librespot ends the whole process (`exit(1)`) when a free account signs in, and
 /// says why only in its log. Its error comes just before the exit, so this says it to the user first.
-struct Log(env_logger::Logger);
+struct Log(env_logger::Logger, bool);
 
 impl log::Log for Log {
     fn enabled(&self, m: &log::Metadata) -> bool {
         self.0.enabled(m)
     }
     fn log(&self, r: &log::Record) {
-        self.0.log(r);
+        if !self.1 { self.0.log(r) }
         if free_account(r.target(), &r.args().to_string()) { premium_needed() }
     }
     fn flush(&self) {
