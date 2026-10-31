@@ -28,7 +28,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `client_id` | the client ID of the user's own Spotify developer app (asked for on first launch; `RESONA_CLIENT_ID` overrides) |
 | `credentials.json` | librespot sign-in |
 | `web_refresh_token` | Web API sign-in (mode 0600) |
-| `settings` | `key=value`: skin, theme, accent (a name or `#rrggbb`), volume, last open list (never a search), `sort:<list>` (each list's order; newest added first by default), `cli_style`, `added_to` (playlists you last added to, first in "Add to playlist") |
+| `settings` | `key=value`: skin, theme, accent (a name or `#rrggbb`), volume, last open list (never a search), `sort:<list>` (each list's order; newest added first by default), `cli_style`, `shuffle` and `repeat` (as last left), `added_to` (playlists you last added to, first in "Add to playlist") |
 | `queue` | the play queue, the song in it and how far in (`settings::save_resume`, on every play and pause and on quit): the next launch loads it paused there (`resume`) |
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `following` | followed artist ids, kept from New releases' last good read, the Follow button and each artist page's follow check (only once the file exists): New releases falls back to it when neither the session nor the Web API answers, the Follow button when its check can't |

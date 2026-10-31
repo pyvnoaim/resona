@@ -121,6 +121,7 @@ impl App {
         app.attach_menu(&cc.egui_ctx);
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
+        app.state.lock().unwrap().load_modes();
         app.state.lock().unwrap().added_to = setting("added_to").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
         app.attach_media(cc);
         match api::client_id(&resona_dir()) {
@@ -706,6 +707,8 @@ pub fn resume(e: &Engine, s: &mut State) {
     (s.queue, s.qi, s.queued, s.shuffle) = (r.queue, r.qi, r.queued, r.shuffle);
     s.queue_src = r.src.as_deref().and_then(Source::from_key);
     (s.now, s.pos_ms, s.since) = (Some(t), r.ms, None);
+    // The shuffle setting wins: the queue may predate a later toggle (unset: the queue's own, as before).
+    if let Some(on) = setting("shuffle").map(|v| v == "on").filter(|&on| on != s.shuffle) { s.set_shuffle(on) }
     e.player().load(librespot::core::SpotifyUri::Track { id }, false, r.ms);
 }
 

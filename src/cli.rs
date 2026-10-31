@@ -198,6 +198,7 @@ pub fn run() {
     let state: Shared = Default::default();
     let slot: Arc<OnceLock<Engine>> = Default::default();
     state.lock().unwrap().unplayable = load_unplayable();
+    state.lock().unwrap().load_modes();
     let (st, sl, cx) = (state.clone(), slot.clone(), ctx.clone());
     rt.spawn(async move {
         if let Err(e) = connect(st.clone(), sl, cx).await { st.lock().unwrap().error = Some(e) }

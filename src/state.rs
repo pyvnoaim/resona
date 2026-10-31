@@ -361,11 +361,20 @@ impl State {
     pub fn toggle_shuffle(&mut self) {
         let on = !self.shuffle;
         self.set_shuffle(on);
+        crate::settings::set_setting("shuffle", if on { "on" } else { "off" });
     }
 
     /// Off → all → one → off.
     pub fn cycle_repeat(&mut self) {
         self.repeat = match self.repeat { Repeat::Off => Repeat::All, Repeat::All => Repeat::One, Repeat::One => Repeat::Off };
+        crate::settings::set_setting("repeat", match self.repeat { Repeat::Off => "off", Repeat::All => "all", Repeat::One => "one" });
+    }
+
+    /// At launch: shuffle and repeat as last left (`resume` then matches shuffle to the saved queue).
+    pub fn load_modes(&mut self) {
+        let get = crate::settings::setting;
+        self.shuffle = get("shuffle").as_deref() == Some("on");
+        self.repeat = match get("repeat").as_deref() { Some("all") => Repeat::All, Some("one") => Repeat::One, _ => Repeat::Off };
     }
 
     /// "Play next" (front of the hand queue) or "Add to queue" (its end). With nothing playing, it just plays.
