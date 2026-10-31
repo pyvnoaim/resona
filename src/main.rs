@@ -122,7 +122,7 @@ impl App {
         app.volume = setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7);
         app.state.lock().unwrap().unplayable = load_unplayable();
         app.state.lock().unwrap().added_to = setting("added_to").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
-        app.attach_media(&cc.egui_ctx);
+        app.attach_media(cc);
         match api::client_id(&resona_dir()) {
             Some(_) => app.start(&cc.egui_ctx),
             None => app.setup = Some(String::new()),
@@ -242,7 +242,8 @@ impl App {
         if self.restored || self.engine.get().is_none() { return }
         self.restored = true;
         self.set_volume(self.volume);
-        self.open(setting("last").and_then(|k| Source::from_key(&k)).unwrap_or(Source::Liked), ctx);
+        if let Some(e) = self.engine.get() { resume(e, &mut self.state.lock().unwrap()) }
+        self.open(Source::last(), ctx);
     }
 
     /// "Song · Artist" in the window title (Dock, Mission Control, ⌘-Tab), sent only when it changes.
@@ -405,7 +406,9 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     }
     // Reopened at launch, before the sidebar is in: only a list that will have its name then.
     let visiting = matches!(&src, Source::Playlist(id) if !state.lock().unwrap().playlists.iter().any(|p| &p.id == id));
-    if let Some(key) = src.key().filter(|_| !visiting) { set_setting("last", &key) }
+    // A search isn't a list to come back to: launch reopens the last list instead.
+    let search = matches!(src, Source::Search(_));
+    if let Some(key) = src.key().filter(|_| !visiting && !search) { set_setting("last", &key) }
     // Back to the last search: its results again, not a new request.
     if let Source::Search(q) = &src {
         let mut s = state.lock().unwrap();
@@ -694,6 +697,18 @@ pub fn command(e: &Engine, s: &mut State, cmd: Cmd) {
     }
 }
 
+/// At launch: the queue and song from last time (`save_resume`), loaded paused where it was left.
+pub fn resume(e: &Engine, s: &mut State) {
+    let Some(r) = load_resume() else { return };
+    let Some(t) = r.queue.get(r.qi).cloned() else { return };
+    let Ok(id) = SpotifyId::from_base62(track_id(t.id.as_deref().unwrap_or_default())) else { return };
+    s.base = r.base();
+    (s.queue, s.qi, s.queued, s.shuffle) = (r.queue, r.qi, r.queued, r.shuffle);
+    s.queue_src = r.src.as_deref().and_then(Source::from_key);
+    (s.now, s.pos_ms, s.since) = (Some(t), r.ms, None);
+    e.player().load(librespot::core::SpotifyUri::Track { id }, false, r.ms);
+}
+
 /// Elsewhere winit shows the cursor egui asks for.
 #[cfg(not(target_os = "macos"))]
 fn show_cursor(_: &egui::Context) {}
@@ -728,6 +743,12 @@ impl eframe::App for App {
             }
             _ => true,
         });
+    }
+
+    /// Where playback is now, for the next launch: while playing, the last save is a song start or a pause behind.
+    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        let saving = save_resume(&self.state.lock().unwrap());
+        if let Some(t) = saving { let _ = t.join(); }
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {

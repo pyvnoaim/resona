@@ -4564,6 +4564,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "protobuf",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",

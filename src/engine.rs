@@ -161,8 +161,14 @@ pub async fn connect(state: Shared, slot: Arc<OnceLock<Engine>>, ctx: egui::Cont
         let player = e.player();
         let mut s = state.lock().unwrap();
         match ev {
-            PlayerEvent::Playing { position_ms, .. } => (s.pos_ms, s.since) = (position_ms, Some(Instant::now())),
-            PlayerEvent::Paused { position_ms, .. } => (s.pos_ms, s.since) = (position_ms, None),
+            PlayerEvent::Playing { position_ms, .. } => {
+                (s.pos_ms, s.since) = (position_ms, Some(Instant::now()));
+                let _ = crate::settings::save_resume(&s);
+            }
+            PlayerEvent::Paused { position_ms, .. } => {
+                (s.pos_ms, s.since) = (position_ms, None);
+                let _ = crate::settings::save_resume(&s);
+            }
             PlayerEvent::Seeked { position_ms, .. } | PlayerEvent::PositionCorrection { position_ms, .. } => {
                 s.pos_ms = position_ms;
                 s.since = s.since.map(|_| Instant::now());

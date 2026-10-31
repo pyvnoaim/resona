@@ -132,9 +132,19 @@ impl App {
     }
 
     /// Hooks into the system's media controls (see `media_controls`); a key press wakes the window.
-    pub fn attach_media(&mut self, ctx: &egui::Context) {
-        let ctx = ctx.clone();
-        if let Some((controls, rx)) = media_controls(move || ctx.request_repaint()) {
+    pub fn attach_media(&mut self, cc: &eframe::CreationContext) {
+        #[cfg(windows)]
+        let hwnd = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match cc.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get() as *mut std::ffi::c_void),
+                _ => None,
+            }
+        };
+        #[cfg(not(windows))]
+        let hwnd = None;
+        let ctx = cc.egui_ctx.clone();
+        if let Some((controls, rx)) = media_controls(hwnd, move || ctx.request_repaint()) {
             self.media = Some(controls);
             self.media_rx = rx;
         }
@@ -252,13 +262,12 @@ impl App {
 /// What the system was last told: the song, playing or not, and the position it was given.
 pub type MediaSent = (Option<String>, bool, u32);
 
-/// The system's media controls: macOS Now Playing (media keys, AirPods, Control Center), Linux MPRIS. `wake`
-/// runs on every event, which arrives on the returned channel.
-/// ponytail: not on Windows, where souvlaki needs the window's HWND (and panics without it); pass it from
-/// eframe's CreationContext to get media keys there (the CLI has no window at all).
-pub fn media_controls(wake: impl Fn() + Send + 'static) -> Option<(souvlaki::MediaControls, std::sync::mpsc::Receiver<souvlaki::MediaControlEvent>)> {
-    if cfg!(target_os = "windows") { return None } // souvlaki panics there without an HWND
-    let config = souvlaki::PlatformConfig { display_name: "resona", dbus_name: "resona", hwnd: None };
+/// The system's media controls: macOS Now Playing (media keys, AirPods, Control Center), Linux MPRIS, Windows
+/// SMTC through the window's `hwnd`. `wake` runs on every event, which arrives on the returned channel.
+/// ponytail: none for the CLI on Windows, which has no window to hang them on.
+pub fn media_controls(hwnd: Option<*mut std::ffi::c_void>, wake: impl Fn() + Send + 'static) -> Option<(souvlaki::MediaControls, std::sync::mpsc::Receiver<souvlaki::MediaControlEvent>)> {
+    if cfg!(windows) && hwnd.is_none() { return None } // souvlaki panics there without an HWND
+    let config = souvlaki::PlatformConfig { display_name: "resona", dbus_name: "resona", hwnd };
     let mut controls = souvlaki::MediaControls::new(config).ok()?;
     let (tx, rx) = std::sync::mpsc::channel();
     controls.attach(move |event| {

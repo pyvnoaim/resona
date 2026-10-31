@@ -44,6 +44,11 @@ impl Source {
             _ => None,
         }
     }
+    /// The list to open at launch: the last one opened (`last=` in settings), never a search (older versions
+    /// saved those too), else Liked Songs.
+    pub fn last() -> Self {
+        crate::settings::setting("last").and_then(|k| Self::from_key(&k)).filter(|s| !matches!(s, Source::Search(_))).unwrap_or(Source::Liked)
+    }
     pub fn from_key(key: &str) -> Option<Self> {
         match key.split_once(':') {
             None if key == "liked" => Some(Source::Liked),

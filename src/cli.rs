@@ -213,7 +213,7 @@ pub fn run() {
     quit_on_hangup();
     let mut restored = false;
     // Media keys and Now Playing / MPRIS, as in the window. The events are looked for in the wait below.
-    let mut media = media_controls(|| {});
+    let mut media = media_controls(None, || {});
     let mut media_sent = MediaSent::default();
     let mut out = std::io::stdout();
     // What's on screen now, so each tick only sends the lines that changed (the clock, mostly).
@@ -223,8 +223,8 @@ pub fn run() {
             restored = true;
             ui.me = e.session().username();
             e.mixer.set_volume((ui.volume * u16::MAX as f32) as u16);
-            let last = setting("last").and_then(|k| Source::from_key(&k)).unwrap_or(Source::Liked);
-            open_list(rt.handle(), e, &state, last, &ctx);
+            crate::resume(e, &mut state.lock().unwrap());
+            open_list(rt.handle(), e, &state, Source::last(), &ctx);
         }
         let (w, h) = terminal::size().unwrap_or((80, 24));
         if (w, h) != shown_size || std::mem::take(&mut ui.repaint) { (shown, shown_size) = (Vec::new(), (w, h)) } // resize or Ctrl+L: everything
@@ -275,6 +275,8 @@ pub fn run() {
         };
         if k.kind == KeyEventKind::Press && !ui.key(k, slot.get(), &state, rt.handle(), &ctx) { break }
     }
+    let saving = save_resume(&state.lock().unwrap());
+    if let Some(t) = saving { let _ = t.join(); }
 }
 
 impl Tui {

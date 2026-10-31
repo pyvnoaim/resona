@@ -148,3 +148,57 @@ fn a_kept_list_comes_back_only_at_its_version() {
     assert!(load_list(&key, "v2").is_none());
     let _ = std::fs::remove_file(list_path(&key));
 }
+
+/// Where playback was, in ~/.resona/queue: the queue, the song in it and how far in. The next launch picks it
+/// up paused (`resume`). Written on every play and pause (engine.rs) and on quit, so a kill loses only the last stretch.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Resume {
+    pub queue: Vec<Track>,
+    pub base: Vec<Track>,
+    pub qi: usize,
+    pub queued: usize,
+    pub shuffle: bool,
+    pub src: Option<String>,
+    pub ms: u32,
+}
+
+/// `base` is kept only while shuffled: otherwise it's the queue without its hand-queued songs. The copy is made
+/// here, under the state lock; the JSON (megabytes for a big Liked Songs) is written on a thread, then renamed in
+/// whole, so a kill mid-write leaves the last good one.
+/// ponytail: two saves a moment apart may land out of order; a writer thread with a channel if that ever shows.
+/// Returns the writing thread, for a quit to wait on.
+pub fn save_resume(s: &crate::state::State) -> Option<std::thread::JoinHandle<()>> {
+    s.now.as_ref()?; // nothing playing: keep what was
+    let r = Resume {
+        queue: s.queue.clone(), base: if s.shuffle { s.base.clone() } else { Vec::new() }, qi: s.qi, queued: s.queued,
+        shuffle: s.shuffle, src: s.queue_src.as_ref().and_then(|src| src.key()), ms: s.position(),
+    };
+    Some(std::thread::spawn(move || {
+        let Ok(json) = serde_json::to_vec(&r) else { return };
+        let tmp = resona_dir().join(format!("queue.{:?}", std::thread::current().id()));
+        if std::fs::write(&tmp, json).is_ok() { let _ = std::fs::rename(&tmp, resona_dir().join("queue")); }
+    }))
+}
+
+impl Resume {
+    /// The queue's own order: `base` as saved, or the queue without the hand-queued songs after `qi`.
+    pub fn base(&self) -> Vec<Track> {
+        if self.shuffle { return self.base.clone() }
+        let mut base = self.queue.clone();
+        let from = (self.qi + 1).min(base.len());
+        base.drain(from..(from + self.queued).min(base.len()));
+        base
+    }
+}
+
+#[test]
+fn an_unshuffled_resume_rebuilds_base_without_the_hand_queued() {
+    let t = |id: &str| Track { id: Some(id.into()), ..Default::default() };
+    let r = Resume { queue: vec![t("a"), t("b"), t("q"), t("c")], base: vec![], qi: 1, queued: 1, shuffle: false, src: None, ms: 0 };
+    let ids: Vec<_> = r.base().into_iter().map(|t| t.id.unwrap()).collect();
+    assert_eq!(ids, ["a", "b", "c"]);
+}
+
+pub fn load_resume() -> Option<Resume> {
+    serde_json::from_slice(&std::fs::read(resona_dir().join("queue")).ok()?).ok()
+}
