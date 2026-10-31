@@ -12,6 +12,7 @@ mod ui;
 mod update;
 
 use std::{
+    collections::HashSet,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -380,7 +381,7 @@ pub fn ask_members(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared) {
 
 /// Shows the copy of this list kept from last time, if it's still at `version`: no song requests at all.
 fn show_kept(state: &Shared, key: &str, version: &str, me: u64, ctx: &egui::Context) -> bool {
-    let Some(tracks) = load_list(key, version) else { return false };
+    let Some((_, tracks)) = load_list(key).filter(|(v, _)| v == version) else { return false };
     let mut s = state.lock().unwrap();
     if s.load_id == me {
         s.add_tracks(tracks);
@@ -388,6 +389,60 @@ fn show_kept(state: &Shared, key: &str, version: &str, me: u64, ctx: &egui::Cont
     }
     ctx.request_repaint();
     true
+}
+
+/// Liked Songs from the copy kept last time, when it's out of date: unliked songs dropped, the new ones read
+/// from the newest page on until every liked id is there (usually one page, instead of all ~90). False when
+/// there's no copy or Spotify can't say what's liked: the caller reads the whole list.
+async fn liked_delta(session: &librespot::core::Session, web: &api::WebAuth, http: &reqwest::Client, state: &Shared, key: &str, me: u64, edits: u32) -> bool {
+    let Ok(ids) = api::session_liked(session).await else { return false };
+    let Some((v, kept)) = load_list(key) else { return false };
+    let version = api::liked_version(&ids);
+    let tracks = if v == version { kept } else {
+        let mut missing: HashSet<&String> = ids.iter().collect();
+        for t in &kept { if let Some(id) = &t.id { missing.remove(id); } }
+        let mut read = Vec::new();
+        let mut url = Some("me/tracks?limit=50".to_string());
+        while let Some(u) = url.take().filter(|_| !missing.is_empty()) {
+            let Ok(p) = api::get::<api::Page<api::Entry>>(web, http, &u).await else { return false };
+            let offset = p.offset;
+            for (i, t) in p.items.into_iter().filter_map(api::Entry::playable).enumerate() {
+                if let Some(id) = &t.id { missing.remove(id); }
+                read.push(api::Track { pos: offset + i, ..t });
+            }
+            url = p.next;
+        }
+        merge_liked(kept, read, &ids)
+    };
+    let mut s = state.lock().unwrap();
+    if s.load_id != me { return true } // user moved on
+    s.add_tracks(tracks);
+    s.loading = false;
+    if v != version { save_list(key, &version, &s.tracks) }
+    if s.liked_edits == edits {
+        s.liked = s.tracks.iter().filter_map(|t| t.id.clone()).collect();
+        s.liked_complete = true;
+        save_liked_ids(&s.liked);
+    }
+    true
+}
+
+/// The newest pages just read, then the kept copy without them and without what's no longer liked, numbered on.
+fn merge_liked(mut kept: Vec<api::Track>, read: Vec<api::Track>, ids: &HashSet<String>) -> Vec<api::Track> {
+    let fresh: HashSet<&String> = read.iter().filter_map(|t| t.id.as_ref()).collect();
+    kept.retain(|t| t.id.as_ref().is_some_and(|id| ids.contains(id) && !fresh.contains(id)));
+    kept.sort_by_key(|t| t.pos);
+    let from = read.len();
+    read.into_iter().chain(kept.into_iter().enumerate().map(|(i, t)| api::Track { pos: from + i, ..t })).collect()
+}
+
+#[test]
+fn merge_liked_puts_new_songs_first_and_drops_unliked() {
+    let t = |id: &str, pos| api::Track { id: Some(id.into()), pos, ..Default::default() };
+    let ids: HashSet<String> = ["n", "a", "c"].map(String::from).into();
+    let got = merge_liked(vec![t("a", 0), t("b", 1), t("c", 2)], vec![t("n", 0), t("a", 1)], &ids);
+    let got: Vec<_> = got.iter().map(|t| (t.id.as_deref().unwrap(), t.pos)).collect();
+    assert_eq!(got, [("n", 0), ("a", 1), ("c", 2)]);
 }
 
 /// Switches the main view and streams that list in, page by page.
@@ -547,6 +602,10 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
             return;
         }
         let key = src.key().unwrap_or_default();
+        if src == Source::Liked && liked_delta(&session, &web, &http, &state, &key, me, edits).await {
+            ctx.request_repaint();
+            return;
+        }
         let version = api::list_version(&session, &src).await;
         if version.as_deref().is_some_and(|v| show_kept(&state, &key, v, me, &ctx)) { return }
         // Pages come in list order, except when the sort puts the list's end on top: Liked Songs is newest
@@ -598,8 +657,6 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         }
         let mut s = state.lock().unwrap();
         s.loading = false;
-        // ponytail: one like or unlike changes Liked Songs' version, so its next open reads every page again;
-        // fetch only the new songs if that ever shows.
         if let (None, Some(v), true) = (&s.error, &version, s.load_id == me) { save_list(&key, v, &s.tracks) }
         if src == Source::Liked && s.error.is_none() && s.liked_edits == edits {
             // The whole of Liked Songs just loaded anyway: that's the fresh set of hearts (unless a like or

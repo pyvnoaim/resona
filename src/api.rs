@@ -356,7 +356,6 @@ pub async fn list_version(session: &Session, src: &crate::state::Source) -> Opti
     use crate::state::Source;
     use librespot::protocol::playlist4_external::SelectedListContent;
     use protobuf::Message;
-    use std::hash::{DefaultHasher, Hash, Hasher};
     match src {
         Source::Playlist(id) => {
             let path = format!("/playlist/v2/playlist/{id}?from=0&length=1");
@@ -364,15 +363,19 @@ pub async fn list_version(session: &Session, src: &crate::state::Source) -> Opti
             let list = SelectedListContent::parse_from_bytes(&bytes).ok()?;
             Some(list.revision().iter().map(|b| format!("{b:02x}")).collect::<String>()).filter(|v| !v.is_empty())
         }
-        Source::Liked => {
-            let mut ids: Vec<String> = session_liked(session).await.ok()?.into_iter().collect();
-            ids.sort();
-            let mut h = DefaultHasher::new();
-            ids.hash(&mut h);
-            Some(format!("{:016x}", h.finish()))
-        }
+        Source::Liked => Some(liked_version(&session_liked(session).await.ok()?)),
         _ => None,
     }
+}
+
+/// Liked Songs' version: a hash of its ids, in any order.
+pub fn liked_version(ids: &std::collections::HashSet<String>) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut ids: Vec<&String> = ids.iter().collect();
+    ids.sort();
+    let mut h = DefaultHasher::new();
+    ids.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 /// The cover Spotify draws for a playlist without its own picture: its first four albums as a mosaic, or the

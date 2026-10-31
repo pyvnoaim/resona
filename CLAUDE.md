@@ -33,7 +33,7 @@ Needs Spotify Premium (librespot playback). Everything the app keeps lives in `~
 | `unplayable` | track ids Spotify refused to play, one per line |
 | `following` | followed artist ids, kept from New releases' last good read, the Follow button and each artist page's follow check (only once the file exists): New releases falls back to it when neither the session nor the Web API answers, the Follow button when its check can't |
 | `liked` | liked track ids, one per line: the hearts at startup, refreshed through the session on every launch |
-| `lists/` | each playlist and Liked Songs as last loaded, with its version (`api::list_version`: a playlist's revision, a hash of Liked Songs' ids); opening a list asks only the version and shows this copy while it matches |
+| `lists/` | each playlist and Liked Songs as last loaded, with its version (`api::list_version`: a playlist's revision, a hash of Liked Songs' ids); opening a list asks only the version and shows this copy while it matches; an outdated Liked Songs is patched instead (`liked_delta`: unliked songs dropped, new ones read from the newest page until every liked id is there) |
 | `audio/` | librespot's cache of songs played lately, up to 1 GB, oldest dropped first |
 | `now-playing` | JSON of the song (`title`, `artist`, `cover` URL, `playing`), rewritten by `controls::media_show` whenever it changes, for other apps (notchroom's record player); stale once Resona quits |
 

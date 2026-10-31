@@ -125,9 +125,10 @@ fn list_path(key: &str) -> std::path::PathBuf {
     resona_dir().join("lists").join(key.replace([':', '/'], "_"))
 }
 
-pub fn load_list(key: &str, version: &str) -> Option<Vec<Track>> {
+/// The copy kept from last time and the version it was saved at.
+pub fn load_list(key: &str) -> Option<(String, Vec<Track>)> {
     let kept: Kept = serde_json::from_slice(&std::fs::read(list_path(key)).ok()?).ok()?;
-    (kept.version == version).then(|| kept.tracks.into_iter().map(|(t, added, pos)| Track { added, pos, ..t }).collect())
+    Some((kept.version, kept.tracks.into_iter().map(|(t, added, pos)| Track { added, pos, ..t }).collect()))
 }
 
 pub fn save_list(key: &str, version: &str, tracks: &[Track]) {
@@ -139,13 +140,12 @@ pub fn save_list(key: &str, version: &str, tracks: &[Track]) {
 }
 
 #[test]
-fn a_kept_list_comes_back_only_at_its_version() {
+fn a_kept_list_comes_back_with_its_version() {
     let key = format!("test:{}", std::process::id());
     let t = Track { id: Some("a".into()), name: "Song".into(), added: 42, pos: 7, ..Default::default() };
     save_list(&key, "v1", &[t]);
-    let back = load_list(&key, "v1").unwrap();
-    assert_eq!((back[0].id.as_deref(), back[0].added, back[0].pos, back[0].name.as_str()), (Some("a"), 42, 7, "Song"));
-    assert!(load_list(&key, "v2").is_none());
+    let (v, back) = load_list(&key).unwrap();
+    assert_eq!((v.as_str(), back[0].id.as_deref(), back[0].added, back[0].pos, back[0].name.as_str()), ("v1", Some("a"), 42, 7, "Song"));
     let _ = std::fs::remove_file(list_path(&key));
 }
 
