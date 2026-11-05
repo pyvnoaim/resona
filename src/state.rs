@@ -30,7 +30,7 @@ pub enum Source {
     Album { id: String, name: String },
     /// Songs from the last two weeks' releases by the artists you follow.
     NewReleases,
-    /// A song's radio: Spotify's mix of similar songs, read as the playlist it hands back.
+    /// A song's radio: its artist and "Fans also like" (`api::artist_radio`), else Spotify's mix (a playlist).
     Radio { track: String, name: String },
 }
 

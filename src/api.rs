@@ -600,6 +600,61 @@ pub async fn radio_playlist(session: &Session, track: &str) -> Result<String, St
     radio_id(&bytes).ok_or_else(|| "Song radio: Spotify has no radio for this song".to_string())
 }
 
+/// A song's radio from its artist's "Fans also like": the song, then the top songs of its artist and up to nine
+/// related ones, artists spread apart. Spotify's own radio leans on your listening more than on the song.
+/// None when the overview query doesn't answer or no songs come back (the caller falls back to Spotify's mix), and
+/// when `go` says the user moved on. ~70 session requests (the song, 10 artists, up to 60 songs) and one query.
+pub async fn artist_radio(session: &Session, http: &reqwest::Client, track: &str, go: impl Fn() -> bool) -> Option<Vec<Track>> {
+    let uri = SpotifyUri::from_uri(&format!("spotify:track:{track}")).ok()?;
+    let seed = patient(|| metadata::Track::get(session, &uri)).await.ok()?;
+    let artist = seed.artists.first()?.id.to_id().ok()?;
+    let related = artist_overview(session, http, &artist).await?.related;
+    if related.is_empty() || !go() { return None }
+    let artists: Vec<String> = std::iter::once(artist).chain(related.into_iter().take(9).map(|c| c.id)).collect();
+    let mut set = tokio::task::JoinSet::new();
+    for id in artists.clone() {
+        let session = session.clone();
+        set.spawn(async move {
+            let u = SpotifyUri::from_uri(&format!("spotify:artist:{id}")).ok()?;
+            let a = patient(|| metadata::Artist::get(&session, &u)).await.ok()?;
+            Some(a.top_tracks.for_country(&session.country()).0.into_iter().take(6).collect::<Vec<_>>())
+        });
+    }
+    let mut picks = vec![];
+    while let Some(done) = set.join_next().await {
+        if let Ok(Some(top)) = done { picks.extend(top) }
+    }
+    if picks.is_empty() || !go() { return None }
+    let radio = radio_mix(Track::from(seed), session_tracks(session, &picks).await, &artists, crate::state::seed());
+    Some(radio).filter(|r| r.len() > 1)
+}
+
+/// The seed song first, then the rest spread by artist, numbered in that order. Only songs led by one of the
+/// radio's artists (a top song can be someone else's with a feature), each song once (the same song comes on
+/// several releases, each with its own id).
+fn radio_mix(seed: Track, picks: Vec<Track>, artists: &[String], shuffle: u64) -> Vec<Track> {
+    let key = |t: &Track| (t.name.to_lowercase(), t.artists.first().map(|a| a.name.clone()));
+    let mut seen = std::collections::HashSet::from([key(&seed)]);
+    let mut picks: Vec<Track> = picks.into_iter()
+        .filter(|t| t.artists.first().and_then(|a| a.id.as_ref()).is_some_and(|id| artists.contains(id)))
+        .filter(|t| seen.insert(key(t)))
+        .collect();
+    crate::state::spread_shuffle(&mut picks, shuffle);
+    let mut out: Vec<Track> = std::iter::once(seed).chain(picks).collect();
+    for (i, t) in out.iter_mut().enumerate() { t.pos = i }
+    out
+}
+
+#[test]
+fn radio_starts_with_its_song_once() {
+    let t = |id: &str, name: &str, by: &str| Track { id: Some(id.into()), name: name.into(), artists: vec![Named { id: Some(by.into()), name: by.into() }], ..Default::default() };
+    let picks = vec![t("a", "A", "x"), t("s2", "Seed", "x"), t("b", "B", "y"), t("b2", "B", "y"), t("f", "Feat", "z")];
+    let got = radio_mix(t("s", "Seed", "x"), picks, &["x".into(), "y".into()], 7);
+    assert_eq!(got[0].id.as_deref(), Some("s"));
+    assert_eq!(got.len(), 3); // the seed's other release, B's second release and z's song are left out
+    assert!(got.iter().enumerate().all(|(i, t)| t.pos == i));
+}
+
 /// `{"mediaItems": [{"uri": "spotify:playlist:<id>"}]}` → the id.
 fn radio_id(json: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
@@ -1245,5 +1300,22 @@ fn web_search_finds_more_than_a_web_api_page() {
         session_playlist(&session, &p.id, crate::state::Sort::List, |t, _| { got += t.len(); true }).await.unwrap();
         eprintln!("\"{}\": {got} songs", p.name);
         assert!(got > 0);
+    });
+}
+
+#[test]
+#[ignore = "live: needs ~/.resona/credentials.json and the network (cargo test -- --ignored)"]
+fn artist_radio_follows_the_song() {
+    use librespot::core::{cache::Cache, config::SessionConfig};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cache = Cache::new(Some(std::env::home_dir().unwrap().join(".resona")), None, None, None).unwrap();
+        let creds = cache.credentials().expect("signed in");
+        let session = Session::new(SessionConfig::default(), Some(cache));
+        session.connect(creds, true).await.unwrap();
+        let radio = artist_radio(&session, &reqwest::Client::new(), "1otWPa1D68VhPGWjOH2SgA", || true).await.expect("a radio"); // Ecco2k, Aldehydes and Ketones
+        for t in &radio { eprintln!("{} - {}", t.artists.first().map_or("", |a| a.name.as_str()), t.name) }
+        assert_eq!(radio[0].id.as_deref(), Some("1otWPa1D68VhPGWjOH2SgA"));
+        assert!(radio.len() > 20);
     });
 }

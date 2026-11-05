@@ -109,9 +109,11 @@ font's default instance.
   fatal: playback runs on librespot and keeps working through a ban, and the sidebar falls back to the session's
   rootlist (`session_playlists`: only uploaded covers, mosaics are rebuilt from each list's first albums by
   `session_mosaic`; every list then opens through the session).
-- **Song radio** (`Source::Radio`): the session's `inspiredby-mix` endpoint turns a song into Spotify's radio
-  playlist (`api::radio_playlist`), which then opens like any session playlist. The Web API's recommendations are
-  closed to developer apps.
+- **Song radio** (`Source::Radio`): built from the song's artist (`api::artist_radio`): the song, then the top
+  songs of its artist and nine of its "Fans also like" (`artist_overview`), spread by artist. Spotify's own radio
+  (`inspiredby-mix`, and `radio-apollo` gives the same list) follows your listening more than the song, so it's
+  only the fallback when the overview query doesn't answer (`api::radio_playlist`, opened like any session
+  playlist). The Web API's recommendations are closed to developer apps.
 - **New releases** (`Source::NewReleases`): followed artists from the session (`session_following`: your
   profile's following list, so it works through a ban), else the Web API (`GET /me/following`, scope
   `user-follow-read`), else `following`; then which of each artist's albums and singles are under two weeks old,

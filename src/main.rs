@@ -453,7 +453,7 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
         (s.view, s.loading, s.error, s.expected, s.artist, s.found) = (Some(src.clone()), true, None, None, None, None);
         s.load_id += 1;
         s.tracks.clear();
-        // Before any song arrives: pages are sorted as they land. A radio keeps Spotify's mix order.
+        // Before any song arrives: pages are sorted as they land. A radio keeps its own order (artists spread apart).
         s.sort = if matches!(src, Source::Radio { .. }) { Sort::List } else { Sort::saved(&src) };
         if src == Source::Queue {
             s.loading = false; // drawn straight from the play queue
@@ -484,6 +484,15 @@ pub fn open_list(rt: &tokio::runtime::Handle, e: &Engine, state: &Shared, src: S
     if foreign {
         let (session, sort, me) = { let s = state.lock().unwrap(); (e.session(), s.sort, s.load_id) };
         rt.spawn(async move {
+            if let Source::Radio { track, .. } = &src && let Some(tracks) = api::artist_radio(&session, &http, track, || state.lock().unwrap().load_id == me).await {
+                let mut s = state.lock().unwrap();
+                if s.load_id == me {
+                    s.add_tracks(tracks);
+                    s.loading = false;
+                }
+                ctx.request_repaint();
+                return;
+            }
             let id = match &src {
                 Source::Radio { track, .. } => api::radio_playlist(&session, track).await,
                 Source::Playlist(id) => Ok(id.clone()),
