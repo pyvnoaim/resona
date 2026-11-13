@@ -1403,7 +1403,7 @@ impl App {
                 forget_unplayable(&mut s.unplayable, &id); // a click gives a faded song another try
             }
             if s.view == Some(Source::Queue) {
-                let at = s.qi + i; // picking from the queue jumps ahead in it
+                let at = s.qi + 1 + i; // picking from the queue jumps ahead in it
                 s.jump_to(&e.player(), at);
             } else {
                 let (list, src) = (s.tracks.clone(), s.view.clone());

@@ -366,7 +366,7 @@ impl Tui {
                 if let Some(t) = s.tracks.get(self.row) {
                     if let Some(id) = t.id.clone() { forget_unplayable(&mut s.unplayable, &id) } // another try
                     if s.view == Some(Source::Queue) {
-                        let at = s.qi + self.row; // picking from the queue jumps ahead in it
+                        let at = s.qi + 1 + self.row; // picking from the queue jumps ahead in it
                         s.jump_to(&e.player(), at);
                     } else {
                         let (list, src) = (s.tracks.clone(), s.view.clone());
@@ -1152,7 +1152,7 @@ fn song_row(s: &State, at: usize, w: usize, bar: bool, bg: Option<C>, sel: bool)
     // Faded songs and the number column step up a shade on the selected row; red would vanish on it.
     let (faded, sub) = if sel { (FG, DIM) } else { (FAINT, SUB) };
     let accent = if sel { BRIGHT } else { red() };
-    let hand = s.view == Some(Source::Queue) && (1..=s.queued).contains(&at); // queued by hand, in the queue view
+    let hand = s.view == Some(Source::Queue); // the queue view holds only songs queued by hand
     let num = if playing { "▶".to_string() } else if hand { "+".to_string() } else { (at + 1).to_string() };
     let mut row = Seg::new(w, bg);
     if bar { row.put(if playing { "▌ " } else { "  " }, red()); }

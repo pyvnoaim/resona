@@ -230,14 +230,15 @@ impl State {
         self.queued > 0 || self.view == Some(Source::Queue)
     }
 
-    /// The queue view's songs: the playing one, then what's next. Rebuilt only when the queue moved.
+    /// The queue view's songs: only the ones queued by hand ("Add to queue" / "Play next"), next first. The playing
+    /// song and the rest of the list it came from aren't the queue. Rebuilt only when the queue moved.
     /// ponytail: a reorder that keeps the length, position and shuffle (none today) wouldn't show until the next move.
     pub fn sync_queue_view(&mut self) {
         if self.view != Some(Source::Queue) { return }
         let now = (self.qi, self.queue.len(), self.queued, self.shuffle);
         if self.queue_seen == Some(now) && !self.tracks.is_empty() { return }
         self.queue_seen = Some(now);
-        self.tracks = self.queue.iter().skip(self.qi).cloned().collect();
+        self.tracks = self.queue.iter().skip(self.qi + 1).take(self.queued).cloned().collect();
     }
 
     /// The next `n` songs playback would actually reach, with their queue index: refused ones are skipped there,
@@ -555,13 +556,13 @@ fn up_next_skips_refused_songs_and_keeps_queue_indices() {
 #[test]
 fn queue_view_is_rebuilt_only_when_the_queue_moves() {
     let t = |id: &str| api::Track { id: Some(id.into()), ..Default::default() };
-    let mut s = State { queue: vec![t("a"), t("b"), t("c")], view: Some(Source::Queue), ..Default::default() };
+    let mut s = State { queue: vec![t("a"), t("b"), t("c")], view: Some(Source::Queue), queued: 1, ..Default::default() };
     s.sync_queue_view();
-    assert_eq!(s.tracks.len(), 3);
+    assert_eq!(s.tracks.iter().map(|t| t.id.as_deref().unwrap()).collect::<Vec<_>>(), ["b"]); // queued by hand only
     s.tracks[0].name = "kept".into();
     s.sync_queue_view(); // nothing moved: not copied again
     assert_eq!(s.tracks[0].name, "kept");
-    s.qi = 1;
+    (s.qi, s.queued) = (1, 0); // the queued song came up
     s.sync_queue_view();
-    assert_eq!(s.tracks.iter().map(|t| t.id.as_deref().unwrap()).collect::<Vec<_>>(), ["b", "c"]);
+    assert!(s.tracks.is_empty());
 }

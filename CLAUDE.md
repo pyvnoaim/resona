@@ -92,7 +92,7 @@ font's default instance.
 - **Mouse cursor:** `show_cursor` sets the `NSCursor` itself each frame; the hand egui asks for through winit's
   cursor rects did not show on macOS 27.
 - **Queue:** `queue` is the list being played (shuffled or not), `base` its original order, `queued` the hand-added
-  songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded. Shuffle is our own
+  songs right after `qi`. `Source::Queue` is drawn straight from the queue, not loaded: only the `queued` songs (the playing song and the rest of its list play on but aren't the queue). Shuffle is our own
   (`spread_shuffle`): each artist's songs are spaced evenly through the queue; switched on with nothing playing,
   it starts the open list.
 - **Rate limits:** `api::get` retries short `retry-after` waits and turns anything over 60s into an error.
