@@ -55,7 +55,8 @@ impl App {
             let song = Submenu::with_items("Song", true, &[
                 &item("like", "Like / Unlike", Some("CmdOrCtrl+L")),
                 &item("copy", "Copy Song Link", Some("CmdOrCtrl+Shift+C")),
-                &item("queue", "Add Highlighted Song to Queue (Q)", None),
+                &item("queue", "Queue / Unqueue Highlighted Song (Q)", None),
+                &item("clearqueue", "Clear Queue (\u{21e7}Q)", None),
             ])?;
             let window = Submenu::with_items("Window", true, &[&Pre::minimize(None), &Pre::fullscreen(None)])?;
             let help = Submenu::with_items("Help", true, &[&item("help", "Keyboard Shortcuts (?)", None)])?;
@@ -106,6 +107,7 @@ impl App {
                 "like" => if let Some(id) = now_id { self.toggle_like(id) },
                 "copy" => if let Some(id) = now_id { ctx.copy_text(format!("https://open.spotify.com/track/{id}")) },
                 "queue" => self.queue_cursor(),
+                "clearqueue" => self.state.lock().unwrap().clear_queue(),
                 "help" => self.help = !self.help,
                 other => {
                     if let Some(name) = other.strip_prefix("accent:") && let Some(a) = skin::Accent::parse(name) {
@@ -165,13 +167,13 @@ impl App {
         set_setting("volume", &format!("{:.2}", self.volume));
     }
 
-    /// Q: the song under the cursor goes to the end of the queue.
+    /// Q: the song under the cursor goes to the end of the queue (in the Queue view: out of it).
     fn queue_cursor(&mut self) {
         let Some(e) = self.engine.get() else { return };
         if self.big { return } // no list on screen, so no highlighted song
         let mut s = self.state.lock().unwrap();
         if let (Pane::Songs, Some(t)) = (self.pane, s.tracks.get(self.row).cloned()) {
-            s.enqueue(&e.player(), t, false);
+            s.queue_row(&e.player(), self.row, t, false);
         }
     }
 
@@ -224,7 +226,7 @@ impl App {
         }
         if hit(Key::S) { self.toggle_shuffle() }
         if hit(Key::R) { self.cycle_repeat() }
-        if once(Key::Q) { self.queue_cursor() }
+        if once(Key::Q) { if shift { self.state.lock().unwrap().clear_queue() } else { self.queue_cursor() } }
         // No list to move through: the cover view is up, or the help or a menu is over it.
         if self.big || self.help || egui::Popup::is_any_open(ctx) { return }
         // The highlighted song, or the playing one while the cursor is in the sidebar.

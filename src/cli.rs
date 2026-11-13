@@ -69,7 +69,7 @@ const SONG_KEYS: &[(&str, &str)] = &[("enter", "play"), ("a", "queue"), ("l", "l
 const ALL_KEYS: &[(&str, &[(&str, &str)])] = &[
     ("move", &[("↑↓ j k", "move"), ("pgup pgdn", "a page"), ("home end", "top, bottom"), ("tab", "library / songs"), ("enter", "open / play"), ("/", "search"), (".", "the playing song")]),
     ("play", &[("space", "pause / play"), ("n b", "next / back"), ("← →", "seek 10 s"), ("+ -", "volume"), ("m", "mute"), ("s", "shuffle"), ("r", "repeat")]),
-    ("song", &[("l", "like"), ("a", "queue"), ("A", "play next"), ("i", "song radio"), ("g", "artist"), ("G", "album"), ("p", "add to playlist"), ("c", "copy link")]),
+    ("song", &[("l", "like"), ("a", "queue (in the queue: remove)"), ("A", "play next (in the queue: to the front)"), ("X", "clear the queue"), ("i", "song radio"), ("g", "artist"), ("G", "album"), ("p", "add to playlist"), ("c", "copy link")]),
     ("view", &[("v", "lyrics"), ("z", "now playing"), ("f", "artists, fans, shows"), ("o", "sort"), ("t", "card / board"), ("?", "these keys"), ("^L", "redraw"), ("q", "quit")]),
 ];
 
@@ -396,10 +396,11 @@ impl Tui {
             KeyCode::Char('r') => state.lock().unwrap().cycle_repeat(),
             KeyCode::Char('/') => (self.search, self.focus) = (Some(String::new()), false), // typed where it shows
             KeyCode::Char('l') => if let Some(id) = pick.and_then(|t| t.id) { toggle_like(rt, e, state, id) },
-            // a: to the end of the queue, A: right after this song.
+            // a: to the end of the queue, A: right after this song (in the Queue: out of it, to its front).
             KeyCode::Char(c @ ('a' | 'A')) if pane == Pane::Songs && !covered => if let Some(t) = pick {
-                state.lock().unwrap().enqueue(&e.player(), t, c == 'A');
+                state.lock().unwrap().queue_row(&e.player(), self.row, t, c == 'A');
             },
+            KeyCode::Char('X') => state.lock().unwrap().clear_queue(),
             KeyCode::Char('i') => {
                 let radio = pick.and_then(|t| Some(Source::Radio { track: t.id?, name: t.name }));
                 if open(radio) { self.pane = Pane::Songs }

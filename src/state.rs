@@ -232,7 +232,8 @@ impl State {
 
     /// The queue view's songs: only the ones queued by hand ("Add to queue" / "Play next"), next first. The playing
     /// song and the rest of the list it came from aren't the queue. Rebuilt only when the queue moved.
-    /// ponytail: a reorder that keeps the length, position and shuffle (none today) wouldn't show until the next move.
+    /// ponytail: a reorder that keeps the length, position and shuffle wouldn't show until the next move, so
+    /// `queue_row` clears `queue_seen` after one.
     pub fn sync_queue_view(&mut self) {
         if self.view != Some(Source::Queue) { return }
         let now = (self.qi, self.queue.len(), self.queued, self.shuffle);
@@ -297,12 +298,17 @@ impl State {
         }
     }
 
+    /// Where the hand-queued tracks sit in `queue`: right after the current one.
+    fn queued_range(&self) -> std::ops::Range<usize> {
+        let from = (self.qi + 1).min(self.queue.len());
+        from..(from + self.queued).min(self.queue.len())
+    }
+
     /// The hand-queued tracks after the current one, removed from the queue.
     pub fn take_queued(&mut self) -> Vec<api::Track> {
-        let from = (self.qi + 1).min(self.queue.len());
-        let to = (from + self.queued).min(self.queue.len());
+        let r = self.queued_range();
         self.queued = 0;
-        self.queue.drain(from..to).collect()
+        self.queue.drain(r).collect()
     }
 
     /// Shuffle on: the current track stays, everything after it gets shuffled. Off: back to the
@@ -388,6 +394,33 @@ impl State {
         let at = (self.qi + 1 + if next { 0 } else { self.queued }).min(self.queue.len());
         self.queue.insert(at, t);
         self.queued += 1;
+    }
+
+    /// Q / a / "Play next" / "Add to queue" on list row `i` (`t`). In the Queue view "Play next" moves the song to
+    /// the front and the others take it out; anywhere else the song is queued.
+    pub fn queue_row(&mut self, player: &Player, i: usize, t: api::Track, next: bool) {
+        if self.view != Some(Source::Queue) { return self.enqueue(player, t, next) }
+        let Some(t) = self.unqueue(i, &t) else { return };
+        self.queue_seen = None; // a move keeps the queue's length and position: redraw the view anyway
+        if next { self.enqueue(player, t, true) } else { self.say(format!("Removed from queue: \u{201c}{}\u{201d}", t.name), false) }
+        let _ = crate::settings::save_resume(self);
+    }
+
+    /// Takes the queue view's song `i` (`t`) out of the queue. Matched by id too: a song that ended since the view
+    /// was drawn shifts every index (songs without an id only by index).
+    fn unqueue(&mut self, i: usize, t: &api::Track) -> Option<api::Track> {
+        let r = self.queued_range();
+        let hit = |j: &usize| self.queue[*j].id == t.id;
+        let at = Some(r.start + i).filter(|j| r.contains(j) && hit(j)).or_else(|| t.id.as_ref().and(r.clone().find(hit)))?;
+        self.queued -= 1;
+        Some(self.queue.remove(at))
+    }
+
+    /// Drops every hand-queued song; the list being played carries on.
+    pub fn clear_queue(&mut self) {
+        if self.take_queued().is_empty() { return }
+        self.say("Queue cleared".into(), false);
+        let _ = crate::settings::save_resume(self);
     }
 
     /// Loads queue[i] into the player. Returns false past either end.
@@ -565,4 +598,23 @@ fn queue_view_is_rebuilt_only_when_the_queue_moves() {
     (s.qi, s.queued) = (1, 0); // the queued song came up
     s.sync_queue_view();
     assert!(s.tracks.is_empty());
+}
+
+#[test]
+fn unqueue_and_clear_take_only_hand_queued_songs() {
+    let t = |id: &str| api::Track { id: Some(id.into()), ..Default::default() };
+    let ids = |s: &State| s.queue.iter().map(|t| t.id.clone().unwrap()).collect::<Vec<_>>();
+    let mut s = State { queue: vec![t("now"), t("q1"), t("q2"), t("list")], queued: 2, ..Default::default() };
+    assert!(s.unqueue(2, &t("list")).is_none()); // not hand-queued: stays
+    s.unqueue(0, &t("q1"));
+    assert_eq!((ids(&s), s.queued), (vec!["now".to_string(), "q2".into(), "list".into()], 1));
+    s.queue.insert(2, t("q3"));
+    s.queued = 2;
+    s.unqueue(0, &t("q3")); // the view was drawn before the queue moved: found by id
+    assert_eq!(ids(&s), ["now", "q2", "list"]);
+    s.queue.insert(2, api::Track::default());
+    s.queued = 2;
+    assert!(s.unqueue(0, &api::Track::default()).is_none()); // no id, and the index points elsewhere: left alone
+    s.clear_queue();
+    assert_eq!((ids(&s), s.queued), (vec!["now".to_string(), "list".into()], 0));
 }

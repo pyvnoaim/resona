@@ -84,28 +84,39 @@ pub fn small(s: Skin) -> FontId {
 #[derive(Default)]
 pub struct SongMenu {
     pub play: bool,
-    pub enqueue: Option<(api::Track, bool)>,
+    /// (the list row it came from, the song, play next)
+    pub enqueue: Option<(Option<usize>, api::Track, bool)>,
     pub like: Option<String>,
     /// (playlist, its name, track, add or take out)
     pub add: Option<(String, String, String, bool)>,
     pub create: Option<(String, String)>,
     pub members: bool,
     pub radio: Option<Source>,
+    pub clear_queue: bool,
 }
 
-/// A song's right-click menu, shared by the track list and the player bar. `play` offers "Play" (not for
-/// the song already playing); `own` is the playlists it can be added to.
-pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, play: bool, out: &mut SongMenu) {
-    if play && ui.button("Play").clicked() {
+/// A song's right-click menu, shared by the track list and the player bar. `row` (a list row, not the song already
+/// playing) offers "Play", and in the Queue view taking the song out.
+pub fn song_menu(ui: &mut egui::Ui, t: &api::Track, s: &State, me: &str, row: Option<usize>, out: &mut SongMenu) {
+    if row.is_some() && ui.button("Play").clicked() {
         out.play = true;
         ui.close();
     }
     if ui.button("Play next").clicked() {
-        out.enqueue = Some((t.clone(), true));
+        out.enqueue = Some((row, t.clone(), true));
         ui.close();
     }
-    if ui.button("Add to queue").clicked() {
-        out.enqueue = Some((t.clone(), false));
+    if row.is_some() && s.view == Some(Source::Queue) {
+        if ui.button("Remove from queue").clicked() {
+            out.enqueue = Some((row, t.clone(), false));
+            ui.close();
+        }
+        if ui.button("Clear queue").clicked() {
+            out.clear_queue = true;
+            ui.close();
+        }
+    } else if ui.button("Add to queue").clicked() {
+        out.enqueue = Some((row, t.clone(), false));
         ui.close();
     }
     let Some(id) = &t.id else { return };
@@ -546,7 +557,7 @@ pub fn help_overlay(ctx: &egui::Context) {
         ("Move", &[("↑  ↓", "Up / down (J K too)"), ("Tab", "Sidebar / songs"), ("Enter", "Open the list / play the song"), ("PgUp PgDn", "Ten rows"), ("Home End", "Top / bottom")]),
         ("Volume", &[("+  -", "Louder / quieter"), ("M", "Mute / unmute")]),
         ("Find & go", &[("⌘ F", "Search Spotify"), ("⌘ J", "Jump to the playing song"), ("⌘ E", "Cover + lyrics view"), ("Esc  ⌘ [", "Close / back to the last list")]),
-        ("This song", &[("⌘ L", "Like / unlike"), ("L", "Like / unlike the highlighted song"), ("⌘ ⇧ C", "Copy song link"), ("Q", "Add the highlighted song to the queue"), ("⌘ ,", "Skin & theme menu"), ("?", "This list")]),
+        ("This song", &[("⌘ L", "Like / unlike"), ("L", "Like / unlike the highlighted song"), ("⌘ ⇧ C", "Copy song link"), ("Q", "Add the highlighted song to the queue (in the Queue: take it out)"), ("⇧ Q", "Clear the queue"), ("⌘ ,", "Skin & theme menu"), ("?", "This list")]),
     ];
     egui::Area::new(egui::Id::new("help")).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).order(egui::Order::Foreground).show(ctx, |ui| {
         let stroke = Stroke::new(1.0_f32, if sk == Skin::Wired { p.accent } else { p.line });
@@ -1367,7 +1378,7 @@ impl App {
                                 }
                             }
 
-                            r.context_menu(|ui| song_menu(ui, t, &s, &me, true, &mut menu));
+                            r.context_menu(|ui| song_menu(ui, t, &s, &me, Some(i), &mut menu));
                             if std::mem::take(&mut menu.play) { clicked = Some(i) }
                             if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { clicked = Some(i) }
                         }
@@ -1431,8 +1442,10 @@ impl App {
 
     /// Does what a song menu asked for.
     fn apply_menu(&mut self, menu: SongMenu, ctx: &egui::Context) {
-        if let (Some((t, next)), Some(e)) = (menu.enqueue, self.engine.get()) {
-            self.state.lock().unwrap().enqueue(&e.player(), t, next);
+        if menu.clear_queue { self.state.lock().unwrap().clear_queue() }
+        if let (Some((row, t, next)), Some(e)) = (menu.enqueue, self.engine.get()) {
+            let mut s = self.state.lock().unwrap();
+            match row { Some(i) => s.queue_row(&e.player(), i, t, next), None => s.enqueue(&e.player(), t, next) }
         }
         if let Some(id) = menu.like { self.toggle_like(id) }
         if let Some((playlist, name, track, add)) = menu.add { self.add_to(playlist, name, track, add, ctx) }
@@ -1484,7 +1497,7 @@ impl App {
                 let size = match sk { Skin::Wired | Skin::Ascii => 52.0, Skin::Swiss => 44.0, };
                 let art = skin::cover(ui, t.thumb(), size, Stamp::None, false);
                 let r = ui.interact(art, egui::Id::new("now-cover"), Sense::click());
-                r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
+                r.context_menu(|ui| song_menu(ui, t, &s, &me, None, &mut menu));
                 if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys(sk, "Cover and lyrics (⌘E)")).clicked() {
                     open_big = true;
                 }
@@ -1507,12 +1520,12 @@ impl App {
                 ui.painter().galley(pos2(x, top), name, p.text);
                 ui.painter().galley(pos2(x, below), artist, p.dim);
                 let r = ui.interact(name_rect, egui::Id::new("now-text"), Sense::click());
-                r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
+                r.context_menu(|ui| song_menu(ui, t, &s, &me, None, &mut menu));
                 if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(cmd_keys(sk, "Show in its list (⌘J)")).clicked() {
                     jump = true;
                 }
                 let (r, to) = artist_link(ui, t, artist_rect, 11.5, egui::Id::new("now-artist"), p.dim);
-                r.context_menu(|ui| song_menu(ui, t, &s, &me, false, &mut menu));
+                r.context_menu(|ui| song_menu(ui, t, &s, &me, None, &mut menu));
                 if to.is_some() { goto = to }
                 if let Some(id) = &t.id {
                     let heart = Rect::from_center_size(pos2(x + text_w + 22.0, art.center().y), vec2(28.0, 28.0));
