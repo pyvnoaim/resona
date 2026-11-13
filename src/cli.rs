@@ -1273,6 +1273,27 @@ fn copy(text: &str) -> bool {
 }
 
 fn title(s: &State, lists: &[(Source, String)]) -> String {
+    let name = list_name(s, lists);
+    let by = match &s.view {
+        Some(Source::Playlist(id)) => s.playlist(id).and_then(|p| p.owner.as_ref()).and_then(|o| o.display_name.as_deref()),
+        _ => None,
+    };
+    match by { Some(by) => format!("{name} by {by}"), None => name }
+}
+
+#[test]
+fn names_a_playlists_owner() {
+    let pl = |owner: serde_json::Value| serde_json::from_value(serde_json::json!({"id": "p", "name": "lamp", "owner": owner})).unwrap();
+    let mut s = State::default();
+    s.view = Some(Source::Playlist("p".into()));
+    let lists = [(Source::Playlist("p".into()), "lamp".to_string())];
+    s.playlists = vec![pl(serde_json::json!({"id": "u", "display_name": "pyvno"}))];
+    assert_eq!(title(&s, &lists), "lamp by pyvno");
+    s.playlists = vec![pl(serde_json::Value::Null)]; // the session fallback has no owner
+    assert_eq!(title(&s, &lists), "lamp");
+}
+
+fn list_name(s: &State, lists: &[(Source, String)]) -> String {
     match &s.view {
         Some(Source::Search(q)) => format!("search \u{201c}{q}\u{201d}"),
         Some(Source::Artist { name, .. } | Source::Album { name, .. }) => name.clone(),

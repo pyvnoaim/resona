@@ -1051,6 +1051,11 @@ impl App {
                                 }
                             });
                         }
+                        // Playlist pages: who made it (none when the sidebar fell back to the session's rootlist).
+                        if let Source::Playlist(id) = &view
+                            && let Some(by) = s.playlist(id).and_then(|pl| pl.owner.as_ref()).and_then(|o| o.display_name.as_deref()) {
+                            ui.label(RichText::new(skin::plain(sk, &format!("by {by}"))).font(small(sk)).color(p.text));
+                        }
                         let released = album.map(|a| a.released.as_str()).filter(|d| !d.is_empty());
                         let n = s.tracks.len();
                         let count = match sk {

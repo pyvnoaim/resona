@@ -1150,7 +1150,7 @@ pub async fn followed_artists(auth: &WebAuth, http: &reqwest::Client) -> Result<
 /// read newest first only up to the first older one (a few requests per artist). Their songs come through the
 /// session and go to `each` one release at a time, `added` set to the release day.
 pub async fn session_new_releases(session: &Session, http: &reqwest::Client, artists: &[String], since: i64, mut each: impl FnMut(Vec<Track>) -> bool) {
-    let mut seen = std::collections::HashSet::new(); // a release shared by two followed artists comes once
+    let (mut seen, mut twins) = (std::collections::HashSet::new(), std::collections::HashSet::new());
     for chunk in artists.chunks(8) {
         let mut set = tokio::task::JoinSet::new();
         for id in chunk {
@@ -1160,7 +1160,10 @@ pub async fn session_new_releases(session: &Session, http: &reqwest::Client, art
         while let Some(done) = set.join_next().await {
             let Ok(albums) = done else { continue }; // one artist failing keeps the others
             for a in albums {
-                if !seen.insert(a.id.clone()) { continue }
+                // A release shared by two followed artists comes once, and so does one put out twice under
+                // its name (clean and explicit, or a single re-released): newest first, so the newest is kept.
+                let twin = (a.name.to_lowercase(), a.artists.first().map(|x| x.id.clone()));
+                if !seen.insert(a.id.clone()) || !twins.insert(twin) { continue }
                 let day = a.date.as_timestamp_ms();
                 let uris: Vec<SpotifyUri> = a.tracks().cloned().collect();
                 let songs = session_tracks(session, &uris).await.into_iter().map(|t| Track { added: day, ..t }).collect();
