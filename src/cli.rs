@@ -96,6 +96,8 @@ struct Tui {
     jump: Option<String>,
     /// The song under the cursor, so it stays there when a sorted list moves songs around (pages arriving, `o`).
     sel: Option<String>,
+    /// The song playing at the last draw: a cursor resting on it follows when the next one starts.
+    was_playing: Option<String>,
     /// Ctrl+L: send the whole screen next time, not only what changed.
     repaint: bool,
     /// The clock the splash and spinners run on.
@@ -205,7 +207,7 @@ pub fn run() {
     });
 
     let mut ui = Tui {
-        pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, repaint: false, born: Instant::now(), muted: None, side_src: None,
+        pane: Pane::Songs, side: 0, side_top: 0, row: 0, row_top: 0, search: None, seen: None, body_h: 1, jump: None, sel: None, was_playing: None, repaint: false, born: Instant::now(), muted: None, side_src: None,
         me: String::new(), lyrics: false, next_row: 0, lyr_top: 0, picker: None, all_keys: false, cards: None, focus: false, cover: Default::default(),
         style: if setting("cli_style").as_deref() == Some("board") { Style::Board } else { Style::Card },
         volume: setting("volume").and_then(|v| v.parse().ok()).unwrap_or(0.7),
@@ -660,6 +662,11 @@ impl Tui {
         {
             self.row = i; // songs moved (a sorted page arrived, or `o`): follow the one under the cursor
         }
+        let playing = s.now.as_ref().and_then(|t| t.id.clone());
+        if playing != self.was_playing {
+            if let Some(i) = follow(&s.tracks, self.row, &self.was_playing, &playing) { (self.row, self.sel) = (i, playing.clone()) }
+            self.was_playing = playing;
+        }
         if let Some(id) = &self.jump {
             // `.`: land on the playing song once its list has it (or give up once the list is done loading).
             match s.tracks.iter().position(|t| t.id.as_ref() == Some(id)) {
@@ -1082,6 +1089,25 @@ fn half_blocks(img: Option<&image::RgbImage>, cols: usize, rows: usize) -> Vec<S
         let (a, b) = (img.get_pixel(x, 2 * y), img.get_pixel(x, 2 * y + 1));
         format!("\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m▀", a[0], a[1], a[2], b[0], b[1], b[2])
     }).collect()).collect()
+}
+
+/// The next song started: a cursor on the one before moves with it, so l, a, i act on what you hear. A cursor
+/// moved anywhere else stays put.
+fn follow(tracks: &[api::Track], row: usize, was: &Option<String>, now: &Option<String>) -> Option<usize> {
+    if was.is_none() || now.is_none() || tracks.get(row).map(|t| &t.id) != Some(was) { return None }
+    tracks.iter().position(|t| &t.id == now)
+}
+
+#[test]
+fn cursor_follows_the_next_song_only_from_the_last_one() {
+    let id = |i: &str| Some(i.to_string());
+    let tracks: Vec<api::Track> = ["a", "b", "c"].iter().map(|&i| api::Track { id: id(i), ..Default::default() }).collect();
+    assert_eq!(follow(&tracks, 0, &id("a"), &id("b")), Some(1)); // on the song that ended: moves
+    assert_eq!(follow(&tracks, 2, &id("a"), &id("b")), None); // browsing elsewhere: stays
+    assert_eq!(follow(&tracks, 0, &None, &id("b")), None); // nothing played before (launch)
+    assert_eq!(follow(&tracks, 0, &id("a"), &id("z")), None); // the next song isn't in this list
+    let local = [tracks[0].clone(), api::Track::default()]; // a local file: no id
+    assert_eq!(follow(&local, 0, &id("a"), &None), None); // playback stopped: stays, not onto the id-less song
 }
 
 #[test]
